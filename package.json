@@ -1,6 +1,6 @@
 {
   "name": "repo-doctor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent skill + standalone scripts to audit and slim bloated repositories — dead files, duplicate files, committed junk, and unused or duplicated dependencies, with an evidence-driven removal plan and post-cleanup verification.",
   "type": "module",
   "private": true,
@@ -21,15 +21,24 @@
     "monorepo"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
+  },
+  "bin": {
+    "repo-doctor-scan": "bin/repo-doctor-scan.mjs",
+    "repo-doctor-plan": "bin/repo-doctor-plan.mjs",
+    "repo-doctor-verify": "bin/repo-doctor-verify.mjs"
   },
   "packageManager": "pnpm@11.6.0",
   "scripts": {
+    "build": "esbuild scan=scripts/scan-cli.ts plan=scripts/plan.ts verify=scripts/verify.ts --bundle --platform=node --format=esm --target=node22 --out-extension:.js=.mjs --outdir=bin --entry-names=repo-doctor-[name] --legal-comments=none",
+    "check:generated": "pnpm build && git diff --exit-code -- bin",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:release": "pnpm build && pnpm typecheck && pnpm test"
   },
   "devDependencies": {
-    "@types/node": "^26.1.2",
+    "@types/node": "^22.0.0",
+    "esbuild": "0.28.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

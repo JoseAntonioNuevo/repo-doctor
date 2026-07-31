@@ -6,6 +6,8 @@ import type {
   MissingDep,
   PackageManifest,
   PackageReport,
+  ProjectReport,
+  ResolvedImportEdge,
   WorkspaceSkew,
 } from "./types.ts";
 
@@ -106,9 +108,14 @@ export interface DepsInput {
   manifests: PackageManifest[];
   /** Module file -> raw import specifiers, from the module graph. */
   importsByFile: Map<string, string[]>;
+  /** Authoritative graph-resolved edges. Raw specifiers are only a legacy test fallback. */
+  resolvedEdges?: ResolvedImportEdge[];
   /** All tracked text files EXCEPT package.json manifests and lockfiles. */
   textFiles: { path: string; content: string }[];
   workspacePkgNames: Set<string>;
+  projects?: ProjectReport[];
+  orphanFiles?: Set<string>;
+  dynamicImporters?: Set<string>;
 }
 
 /**
@@ -135,7 +142,21 @@ export function analyzeDeps(input: DepsInput): {
   // runtime imports react invisibly, so "react" counts as used there even when
   // no file spells out the import.
   const jsxDirs = new Set<string>();
-  for (const [file, specs] of input.importsByFile) {
+  const authoritative = input.resolvedEdges !== undefined;
+  const edgeImports = new Map<string, { name: string; context: ResolvedImportEdge["context"] }[]>();
+  const workspaceImports = new Map<string, Set<string>>();
+  for (const edge of input.resolvedEdges ?? []) {
+    if ((edge.target !== "external-package" && edge.target !== "workspace-package") || edge.packageName === null) continue;
+    edgeImports.set(edge.from, [...(edgeImports.get(edge.from) ?? []), { name: edge.packageName, context: edge.context }]);
+    if (edge.target === "workspace-package") {
+      const owner = owningManifest(manifests, edge.from);
+      if (owner) workspaceImports.set(owner.dir, new Set([...(workspaceImports.get(owner.dir) ?? []), edge.packageName]));
+    }
+  }
+  const importEntries = authoritative
+    ? [...edgeImports.entries()].map(([file, values]) => [file, values.map((value) => value.name)] as const)
+    : [...input.importsByFile.entries()];
+  for (const [file, specs] of importEntries) {
     const owner = owningManifest(manifests, file);
     if (owner === null) continue;
     if (file.endsWith(".jsx") || file.endsWith(".tsx")) jsxDirs.add(owner.dir);
@@ -145,7 +166,7 @@ export function analyzeDeps(input: DepsInput): {
       importsByManifest.set(owner.dir, byPackage);
     }
     for (const spec of specs) {
-      const pkg = specifierToPackage(spec);
+      const pkg = authoritative ? spec : specifierToPackage(spec);
       if (pkg === null) continue;
       let files = byPackage.get(pkg);
       if (files === undefined) {
@@ -156,27 +177,27 @@ export function analyzeDeps(input: DepsInput): {
     }
   }
 
-  // Word-boundary search over every text file is the expensive part — cache per name.
+  // Text evidence is package-owned. Source modules are excluded because their
+  // imports already came through resolved graph edges.
+  const modulePaths = new Set(input.importsByFile.keys());
   const textHitCache = new Map<string, string[]>();
-  const textHitsFor = (name: string): string[] => {
-    const cached = textHitCache.get(name);
+  const textHitsFor = (manifest: PackageManifest, name: string): string[] => {
+    const cacheKey = `${manifest.dir}\0${name}`;
+    const cached = textHitCache.get(cacheKey);
     if (cached !== undefined) return cached;
     const re = wordRegex(name);
     const hits: string[] = [];
     for (const file of textFiles) {
+      if (modulePaths.has(file.path)) continue;
+      if (owningManifest(manifests, file.path)?.dir !== manifest.dir) continue;
       if (re.test(file.content)) {
         hits.push(file.path);
         if (hits.length === TEXT_HIT_CAP) break;
       }
     }
-    textHitCache.set(name, hits);
+    textHitCache.set(cacheKey, hits);
     return hits;
   };
-
-  const scriptsText = manifests.map(scriptsOf).join("\n");
-  const eslintConfigs = textFiles.filter((f) => isConfig(f.path, ".eslintrc", "eslint.config."));
-  const babelConfigs = textFiles.filter((f) => isConfig(f.path, ".babelrc", "babel.config."));
-  const hasPrettierConfig = textFiles.some((f) => isConfig(f.path, ".prettierrc", "prettier.config."));
 
   const binsByPackage = new Map<string, string[]>();
   for (const [bin, pkg] of Object.entries(BIN_TO_PACKAGE)) {
@@ -187,6 +208,17 @@ export function analyzeDeps(input: DepsInput): {
   const packages: PackageReport[] = [];
 
   for (const manifest of manifests) {
+    const ownedText = textFiles.filter((file) => owningManifest(manifests, file.path)?.dir === manifest.dir);
+    const embeddedConfig = (key: string): { path: string; content: string }[] => {
+      if (!Object.hasOwn(manifest.raw, key)) return [];
+      return [{ path: `${manifest.dir === "." ? "" : `${manifest.dir}/`}package.json#${key}`, content: JSON.stringify(manifest.raw[key]) }];
+    };
+    const scriptsText = scriptsOf(manifest);
+    const eslintConfigs = [...ownedText.filter((f) => isConfig(f.path, ".eslintrc", "eslint.config.")), ...embeddedConfig("eslintConfig")];
+    const babelConfigs = [...ownedText.filter((f) => isConfig(f.path, ".babelrc", "babel.config.")), ...embeddedConfig("babel")];
+    const prettierConfigs = [...ownedText.filter((f) => isConfig(f.path, ".prettierrc", "prettier.config.")), ...embeddedConfig("prettier")];
+    const postcssConfigs = [...ownedText.filter((f) => isConfig(f.path, ".postcssrc", "postcss.config.")), ...embeddedConfig("postcss")];
+    const jestConfigs = [...ownedText.filter((f) => isConfig(f.path, ".jestrc", "jest.config.")), ...embeddedConfig("jest")];
     const imported = importsByManifest.get(manifest.dir) ?? new Map<string, Set<string>>();
     const declared = new Set<string>();
     for (const field of DEP_FIELDS) {
@@ -196,7 +228,7 @@ export function analyzeDeps(input: DepsInput): {
     // Direct evidence first — the @types rule consults it for the base package.
     const directlyUsed = new Set<string>();
     for (const name of declared) {
-      if ((imported.get(name)?.size ?? 0) > 0 || textHitsFor(name).length > 0) {
+      if ((imported.get(name)?.size ?? 0) > 0 || textHitsFor(manifest, name).length > 0) {
         directlyUsed.add(name);
       }
     }
@@ -214,6 +246,9 @@ export function analyzeDeps(input: DepsInput): {
       for (const bin of binsByPackage.get(name) ?? []) {
         if (wordRegex(bin).test(scriptsText)) return `bin "${bin}" appears in package.json scripts`;
       }
+      const genericBins = [name, name.startsWith("@") ? name.slice(name.indexOf("/") + 1) : name];
+      const scriptBin = genericBins.find((bin) => wordRegex(bin).test(scriptsText));
+      if (scriptBin) return `script binary "${scriptBin}" is invoked by package.json scripts`;
       const eslintToken = shorthandToken(name, "eslint-config");
       if (eslintToken !== null) {
         const config = eslintConfigs.find((f) => wordRegex(eslintToken).test(f.content));
@@ -224,11 +259,24 @@ export function analyzeDeps(input: DepsInput): {
         const config = babelConfigs.find((f) => wordRegex(babelToken).test(f.content));
         if (config !== undefined) return `babel config ${config.path} references "${babelToken}"`;
       }
-      if (name.startsWith("prettier-plugin-") && hasPrettierConfig) {
-        return "prettier plugin and a prettier config is present";
+      const eslintPlugin = shorthandToken(name, "eslint-plugin");
+      if (eslintPlugin !== null) {
+        const config = eslintConfigs.find((f) => wordRegex(eslintPlugin).test(f.content));
+        if (config) return `eslint config ${config.path} references plugin "${eslintPlugin}"`;
       }
-      if (range.startsWith("workspace:") || input.workspacePkgNames.has(name)) {
-        return "workspace package";
+      const babelPlugin = shorthandToken(name, "babel-plugin");
+      if (babelPlugin !== null) {
+        const config = babelConfigs.find((f) => wordRegex(babelPlugin).test(f.content));
+        if (config) return `babel config ${config.path} references plugin "${babelPlugin}"`;
+      }
+      if ((name.startsWith("prettier-plugin-") || /^@[^/]+\/prettier-plugin-/.test(name)) && prettierConfigs.length > 0) {
+        return `prettier plugin and config ${prettierConfigs[0].path} are package-scoped`;
+      }
+      if ((name.startsWith("postcss-") || name.endsWith("-postcss")) && postcssConfigs.some((f) => wordRegex(name.replace(/^postcss-/, "")).test(f.content))) {
+        return `postcss config ${postcssConfigs[0].path} references this plugin`;
+      }
+      if ((name.startsWith("jest-") || name.includes("jest")) && jestConfigs.some((f) => wordRegex(name).test(f.content))) {
+        return `jest config ${jestConfigs[0].path} references this package`;
       }
       return null;
     };
@@ -241,8 +289,14 @@ export function analyzeDeps(input: DepsInput): {
           field,
           range,
           usedBy: [...(imported.get(name) ?? [])].sort(),
-          textHits: [...textHitsFor(name)],
+          textHits: [...textHitsFor(manifest, name)],
           implicitReason: implicitReasonFor(name, range),
+          evidence: [
+            ...[...(imported.get(name) ?? [])].map((path) => ({ kind: "import" as const, path, detail: `resolved import of ${name}`, context: edgeImports.get(path)?.find((edge) => edge.name === name)?.context ?? "unknown" as const })),
+            ...textHitsFor(manifest, name).map((path) => ({ kind: "config" as const, path, detail: `package-scoped mention of ${name}`, context: "config" as const })),
+            ...(implicitReasonFor(name, range) ? [{ kind: "implicit" as const, path: manifest.dir === "." ? "package.json" : `${manifest.dir}/package.json`, detail: implicitReasonFor(name, range)!, context: "config" as const }] : []),
+          ],
+          contexts: [...new Set([...(imported.get(name) ?? [])].map((path) => edgeImports.get(path)?.find((edge) => edge.name === name)?.context ?? "unknown"))],
         });
       }
     }
@@ -252,7 +306,15 @@ export function analyzeDeps(input: DepsInput): {
     for (const d of deps) {
       if (d.usedBy.length > 0 || d.textHits.length > 0 || d.implicitReason !== null) used.add(d.name);
     }
-    const unused = [...declared].filter((name) => !used.has(name)).sort();
+    const dynamicOwned = [...(input.dynamicImporters ?? [])].some((path) => owningManifest(manifests, path)?.dir === manifest.dir);
+    const uncertain = dynamicOwned ? [...declared].filter((name) => !used.has(name)).sort() : [];
+    const unused = [...declared].filter((name) => !used.has(name) && !uncertain.includes(name)).sort();
+    const orphanOnly = [...declared].filter((name) => {
+      const evidence = deps.filter((dep) => dep.name === name);
+      const files = evidence.flatMap((dep) => dep.usedBy);
+      return files.length > 0 && files.every((path) => input.orphanFiles?.has(path)) &&
+        evidence.every((dep) => dep.textHits.length === 0 && dep.implicitReason === null);
+    }).sort();
 
     const dualDeclared = Object.keys(manifest.fields.dependencies)
       .filter((name) => name in manifest.fields.devDependencies)
@@ -260,16 +322,39 @@ export function analyzeDeps(input: DepsInput): {
 
     const missing: MissingDep[] = [];
     for (const [pkg, importers] of imported) {
-      if (declared.has(pkg) || input.workspacePkgNames.has(pkg)) continue;
+      if (declared.has(pkg)) continue;
+      const workspaceTarget = manifests.find((candidate) =>
+        candidate.name === pkg && candidate.dir !== manifest.dir &&
+        (candidate.projectRoot ?? candidate.dir) === (manifest.projectRoot ?? manifest.dir),
+      );
+      const workspaceImport = authoritative
+        ? (workspaceImports.get(manifest.dir)?.has(pkg) ?? false)
+        : workspaceTarget !== undefined || input.workspacePkgNames.has(pkg);
       missing.push({
         name: pkg,
         importers: [...importers].sort(),
-        declaredIn: nearestDeclaringAncestor(byDir, manifest.dir, pkg),
+        declaredIn: nearestDeclaringAncestor(byDir, manifest.dir, manifest.projectRoot ?? ".", pkg),
+        kind: workspaceImport ? "workspace" : "external",
+        workspaceTargetDir: workspaceTarget?.dir ?? null,
+        suggestedField: null,
+        suggestedRange: workspaceImport ? "workspace:*" : null,
       });
     }
     missing.sort((a, b) => cmp(a.name, b.name));
 
-    packages.push({ dir: manifest.dir, name: manifest.name, deps, unused, missing, dualDeclared });
+    packages.push({
+      dir: manifest.dir,
+      name: manifest.name,
+      manifest: manifest.raw,
+      projectRoot: manifest.projectRoot ?? ".",
+      projectKind: manifest.projectKind ?? "unmanaged",
+      deps,
+      unused,
+      orphanOnly,
+      uncertain,
+      missing,
+      dualDeclared,
+    });
   }
 
   return { packages, workspaceSkew: findWorkspaceSkew(manifests) };
@@ -308,16 +393,18 @@ function typesBaseOf(name: string): string | null {
 }
 
 /** "eslint-config-airbnb" -> "airbnb"; "@acme/eslint-config" -> "@acme" (the shorthand the tool resolves). */
-function shorthandToken(name: string, kind: "eslint-config" | "babel-preset"): string | null {
+function shorthandToken(name: string, kind: "eslint-config" | "babel-preset" | "eslint-plugin" | "babel-plugin"): string | null {
   if (name.startsWith(`${kind}-`)) return name.slice(kind.length + 1);
   const scoped = /^(@[^/]+)\/(.+)$/.exec(name);
   if (scoped !== null && scoped[2] === kind) return scoped[1];
+  if (scoped !== null && scoped[2].startsWith(`${kind}-`)) return `${scoped[1]}/${scoped[2].slice(kind.length + 1)}`;
   return null;
 }
 
 function nearestDeclaringAncestor(
   byDir: Map<string, PackageManifest>,
   fromDir: string,
+  projectRoot: string,
   pkg: string,
 ): string | null {
   let dir = fromDir;
@@ -325,32 +412,35 @@ function nearestDeclaringAncestor(
     const cut = dir.lastIndexOf("/");
     dir = cut === -1 ? "." : dir.slice(0, cut);
     const ancestor = byDir.get(dir);
-    if (ancestor !== undefined && DEP_FIELDS.some((field) => pkg in ancestor.fields[field])) {
+    if (ancestor !== undefined && (ancestor.projectRoot ?? ".") === projectRoot && DEP_FIELDS.some((field) => pkg in ancestor.fields[field])) {
       return ancestor.dir;
     }
+    if (dir === projectRoot) break;
   }
   return null;
 }
 
 function findWorkspaceSkew(manifests: PackageManifest[]): WorkspaceSkew[] {
   // One range per (manifest, name): the first declaring field wins, in DEP_FIELDS order.
-  const rangesByName = new Map<string, Record<string, string>>();
+  const rangesByName = new Map<string, { projectRoot: string; name: string; ranges: Record<string, string> }>();
   for (const manifest of manifests) {
     const seen = new Set<string>();
     for (const field of DEP_FIELDS) {
       for (const [name, range] of Object.entries(manifest.fields[field])) {
         if (seen.has(name)) continue;
         seen.add(name);
-        const ranges = rangesByName.get(name) ?? {};
-        ranges[manifest.dir] = range;
-        rangesByName.set(name, ranges);
+        const projectRoot = manifest.projectRoot ?? ".";
+        const key = `${projectRoot}\0${name}`;
+        const entry = rangesByName.get(key) ?? { projectRoot, name, ranges: {} };
+        entry.ranges[manifest.dir] = range;
+        rangesByName.set(key, entry);
       }
     }
   }
-  return [...rangesByName.entries()]
-    .filter(([, ranges]) => new Set(Object.values(ranges)).size >= 2)
-    .map(([name, ranges]) => ({ name, ranges }))
-    .sort((a, b) => cmp(a.name, b.name));
+  return [...rangesByName.values()]
+    .filter((entry) => new Set(Object.values(entry.ranges)).size >= 2)
+    .map((entry) => ({ name: entry.name, ranges: entry.ranges, projectRoot: entry.projectRoot }))
+    .sort((a, b) => cmp(a.projectRoot ?? ".", b.projectRoot ?? ".") || cmp(a.name, b.name));
 }
 
 /**

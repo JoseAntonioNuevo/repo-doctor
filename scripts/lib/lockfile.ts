@@ -1,11 +1,14 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { LockfileDuplicate, PackageManager } from "./types.ts";
+import type { Diagnostic, LockfileDuplicate, PackageManager } from "./types.ts";
 
 const LOCKFILES: { kind: string; pm: PackageManager }[] = [
   { kind: "pnpm-lock.yaml", pm: "pnpm" },
   { kind: "package-lock.json", pm: "npm" },
+  { kind: "npm-shrinkwrap.json", pm: "npm" },
   { kind: "yarn.lock", pm: "yarn" },
+  { kind: "bun.lock", pm: "bun" },
+  { kind: "bun.lockb", pm: "bun" },
 ];
 
 /**
@@ -13,11 +16,79 @@ const LOCKFILES: { kind: string; pm: PackageManager }[] = [
  * keep a stale lockfile from the previous package manager around:
  * pnpm-lock.yaml > package-lock.json > yarn.lock.
  */
-export function detectLockfile(cwd: string): { kind: string; pm: PackageManager } | null {
-  for (const lockfile of LOCKFILES) {
-    if (existsSync(join(cwd, lockfile.kind))) return { ...lockfile };
+export function detectLockfile(cwd: string, trackedFiles?: string[]): { kind: string; pm: PackageManager } | null {
+  if (trackedFiles === undefined) {
+    for (const lockfile of LOCKFILES) if (existsSync(join(cwd, lockfile.kind))) return { ...lockfile };
+    return null;
   }
-  return null;
+  const tracked = trackedFiles ? new Set(trackedFiles) : null;
+  const found = LOCKFILES.filter((lockfile) => tracked ? tracked.has(lockfile.kind) : existsSync(join(cwd, lockfile.kind)));
+  if (found.length !== 1) return null;
+  return found[0] ? { ...found[0] } : null;
+}
+
+export interface LockfileParseResult {
+  dialect: string;
+  parseStatus: "parsed" | "unsupported" | "invalid";
+  versions: Map<string, Set<string>>;
+  diagnostics: Diagnostic[];
+}
+
+const lockDiagnostic = (code: string, message: string): Diagnostic => ({
+  code,
+  severity: "error",
+  source: "lockfile",
+  message,
+  affects: ["lockfile"],
+  scope: { kind: "project", path: "." },
+});
+
+export function parseLockfile(kind: string, rawContent: string): LockfileParseResult {
+  const content = rawContent.replace(/\r\n?/g, "\n");
+  try {
+    if (kind === "package-lock.json" || kind === "npm-shrinkwrap.json") {
+      const parsed = JSON.parse(content) as unknown;
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { dialect: "npm-invalid", parseStatus: "invalid", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.invalid-npm", "npm lockfile must contain a JSON object.")] };
+      }
+      const raw = parsed as { lockfileVersion?: unknown };
+      if (raw.lockfileVersion !== undefined && typeof raw.lockfileVersion !== "number") {
+        return { dialect: "npm-invalid", parseStatus: "invalid", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.invalid-npm-version", "npm lockfileVersion must be numeric.")] };
+      }
+      const version = typeof raw.lockfileVersion === "number" ? raw.lockfileVersion : 1;
+      if (![1, 2, 3].includes(version)) {
+        return { dialect: `npm-v${version}`, parseStatus: "unsupported", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.unsupported-npm-version", `Unsupported npm lockfileVersion ${version}.`)] };
+      }
+      return { dialect: `npm-v${version}`, parseStatus: "parsed", versions: parseNpmLock(content), diagnostics: [] };
+    }
+    if (kind === "pnpm-lock.yaml") {
+      const match = /^lockfileVersion:\s*["']?([^"'\s]+)["']?/m.exec(content);
+      if (!match) return { dialect: "pnpm-unknown", parseStatus: "invalid", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.invalid-pnpm", "pnpm lockfile has no lockfileVersion.")] };
+      const major = Number(match[1].split(".")[0]);
+      if (![5, 6, 7, 8, 9].includes(major)) return { dialect: `pnpm-v${match[1]}`, parseStatus: "unsupported", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.unsupported-pnpm-version", `Unsupported pnpm lockfileVersion ${match[1]}.`)] };
+      return { dialect: `pnpm-v${match[1]}`, parseStatus: "parsed", versions: parsePnpmLock(content), diagnostics: [] };
+    }
+    if (kind === "yarn.lock") {
+      const berry = /^__metadata:\s*$/m.test(content);
+      if (berry) {
+        const metadataVersion = /^__metadata:\s*\n\s+version:\s*([0-9]+)/m.exec(content)?.[1];
+        if (metadataVersion !== undefined && ![6, 8].includes(Number(metadataVersion))) {
+          return { dialect: `yarn-berry-v${metadataVersion}`, parseStatus: "unsupported", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.unsupported-yarn-version", `Unsupported Yarn Berry lockfile version ${metadataVersion}.`)] };
+        }
+        return { dialect: "yarn-berry", parseStatus: "parsed", versions: parseYarnBerryLock(content), diagnostics: [] };
+      }
+      if (content.trim() !== "" && !/^#\s*yarn lockfile v1\b/m.test(content)) {
+        return { dialect: "yarn-classic", parseStatus: "invalid", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.invalid-yarn-classic", "Yarn Classic lockfile is missing its v1 header.")] };
+      }
+      return { dialect: "yarn-classic", parseStatus: "parsed", versions: parseYarnLock(content), diagnostics: [] };
+    }
+    if (kind === "bun.lock" || kind === "bun.lockb") {
+      return { dialect: kind, parseStatus: "unsupported", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.unsupported-bun-dialect", `${kind} is detected for gate selection, but duplicate-version analysis is unavailable.`)] };
+    }
+    return { dialect: kind, parseStatus: "unsupported", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.unsupported-dialect", `Unsupported lockfile dialect: ${kind}.`)] };
+  } catch (error) {
+    return { dialect: kind, parseStatus: "invalid", versions: new Map(), diagnostics: [lockDiagnostic("lockfile.invalid", `${kind} could not be parsed: ${(error as Error).message}`)] };
+  }
 }
 
 /**
@@ -28,10 +99,7 @@ export function detectLockfile(cwd: string): { kind: string; pm: PackageManager 
  * never fatal: a weird entry costs one data point, not the scan.
  */
 export function parseLockfileVersions(kind: string, content: string): Map<string, Set<string>> {
-  if (kind === "pnpm-lock.yaml") return parsePnpmLock(content);
-  if (kind === "package-lock.json") return parseNpmLock(content);
-  if (kind === "yarn.lock") return parseYarnLock(content);
-  return new Map();
+  return parseLockfile(kind, content).versions;
 }
 
 /** Deps resolved to two or more versions — worst offenders first. */
@@ -57,7 +125,7 @@ function parsePnpmLock(content: string): Map<string, Set<string>> {
       continue;
     }
     if (section !== "packages" && section !== "snapshots") continue;
-    const entry = /^ {2}(\S[^:]*):(?: \{\})?\s*$/.exec(line);
+    const entry = /^ {2}(.+):(?: \{\})?\s*$/.exec(line);
     if (entry === null) continue;
     let key = entry[1];
     if ((key.startsWith("'") && key.endsWith("'")) || (key.startsWith('"') && key.endsWith('"'))) {
@@ -67,9 +135,11 @@ function parsePnpmLock(content: string): Map<string, Set<string>> {
     const paren = key.indexOf("(");
     if (paren !== -1) key = key.slice(0, paren); // peer-dependency suffix
     const at = key.lastIndexOf("@");
-    if (at <= 0) continue; // no version separator (or a bare scope)
-    const name = key.slice(0, at);
-    const version = key.slice(at + 1);
+    const slash = key.lastIndexOf("/");
+    const separator = at > 0 ? at : slash;
+    if (separator <= 0) continue; // no version separator (or a bare scope)
+    const name = at > 0 ? descriptorName(key, at) : key.slice(0, slash);
+    const version = key.slice(separator + 1);
     if (!/^\d/.test(version)) continue; // link:/file:/git deps carry no registry version
     addVersion(versions, name, version);
   }
@@ -133,13 +203,37 @@ function parseYarnLock(content: string): Map<string, Set<string>> {
         if (cleaned.startsWith('"') && cleaned.endsWith('"')) cleaned = cleaned.slice(1, -1);
         const at = cleaned.lastIndexOf("@");
         if (at <= 0) continue; // no range separator (yarn berry metadata keys land here too)
-        pending.push(cleaned.slice(0, at));
+        pending.push(descriptorName(cleaned, at));
       }
       continue;
     }
     const version = /^ {2}version "?([^"\s]+)"?\s*$/.exec(line);
     if (version !== null && pending.length > 0) {
       for (const name of pending) addVersion(versions, name, version[1]);
+      pending = [];
+    }
+  }
+  return versions;
+}
+
+/** Yarn Berry stores a quoted descriptor header and a `version:` scalar. */
+function parseYarnBerryLock(content: string): Map<string, Set<string>> {
+  const versions = new Map<string, Set<string>>();
+  let pending: string[] = [];
+  for (const line of content.split("\n")) {
+    if (!line.startsWith(" ") && line.endsWith(":")) {
+      let header = line.slice(0, -1).trim();
+      if (header.startsWith('"') && header.endsWith('"')) header = header.slice(1, -1);
+      pending = header.split(/,\s*/).flatMap((descriptor) => {
+        const cleaned = descriptor.replace(/^"|"$/g, "");
+        const at = cleaned.startsWith("@") ? cleaned.indexOf("@", 1) : cleaned.indexOf("@");
+        return at > 0 ? [descriptorName(cleaned, cleaned.lastIndexOf("@"))] : [];
+      });
+      continue;
+    }
+    const match = /^\s{2}version:\s*["']?([^"'\s]+)["']?\s*$/.exec(line);
+    if (match && pending.length > 0) {
+      for (const name of pending) addVersion(versions, name, match[1]);
       pending = [];
     }
   }
@@ -153,6 +247,13 @@ function addVersion(versions: Map<string, Set<string>>, name: string, version: s
     versions.set(name, set);
   }
   set.add(version);
+}
+
+/** Name portion of a registry descriptor, including npm aliases. */
+function descriptorName(value: string, versionAt: number): string {
+  const firstAt = value.startsWith("@") ? value.indexOf("@", 1) : value.indexOf("@");
+  if (firstAt <= 0 || firstAt >= versionAt) return value.slice(0, versionAt);
+  return value.slice(0, firstAt);
 }
 
 /** Numeric-aware version compare so "10.0.0" sorts after "9.0.0". */

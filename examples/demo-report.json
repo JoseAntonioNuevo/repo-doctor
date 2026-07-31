@@ -1,17 +1,96 @@
 {
-  "version": 1,
+  "version": 2,
   "tool": "repo-doctor",
-  "createdAt": "2026-07-31T18:17:39.895Z",
+  "toolVersion": "0.2.0",
+  "createdAt": "2026-01-01T00:00:00.000Z",
   "cwd": "demo-fixture",
+  "source": {
+    "repository": {
+      "id": "sha256:a516e6e10e48fbcaf6f49a25ef9f7453ce4995d3ca8ddf4841d97a3963da4729",
+      "kind": "git-history",
+      "root": "demo-fixture",
+      "head": "c5739ce854e6d808e39098928ab0fefc3053fbd3",
+      "rootCommits": [
+        "c5739ce854e6d808e39098928ab0fefc3053fbd3"
+      ]
+    },
+    "inventoryDigest": "sha256:2bcf795df9a43cd93cecd24ae002cd3cabfb9c18a3468da3d1f9744899be2a1d",
+    "indexDigest": "sha256:3feef29cfac9ce70a9e0c33426fa7d1c81d4581d8e3c451a34f68071e07f0f1c",
+    "trackedWorktreeClean": true
+  },
   "scanOptions": {
     "ignore": [],
-    "entries": []
+    "entries": [],
+    "largeCount": 20,
+    "minDupBytes": 1
   },
+  "scanOptionsDigest": "sha256:b5db212a9cbaeecaace7d41770c82525517a7658c07df21148204e968c278b00",
+  "health": {
+    "inventory": "complete",
+    "graph": "degraded",
+    "dependencies": "degraded",
+    "workspace": "complete",
+    "lockfile": "complete"
+  },
+  "diagnostics": [
+    {
+      "code": "graph.dynamic-nonliteral",
+      "severity": "warning",
+      "source": "graph",
+      "message": "src/index.ts contains a non-literal dynamic load; dependency and orphan certainty is reduced for this file.",
+      "affects": [
+        "graph",
+        "dependencies"
+      ],
+      "scope": {
+        "kind": "file",
+        "path": "src/index.ts"
+      }
+    }
+  ],
+  "projects": [
+    {
+      "rootDir": ".",
+      "kind": "standalone",
+      "manager": {
+        "status": "resolved",
+        "name": "npm",
+        "version": "10.9.0",
+        "source": "packageManager",
+        "lockfilePath": "package-lock.json",
+        "conflicts": []
+      },
+      "workspacePatterns": [],
+      "packageDirs": [
+        "."
+      ],
+      "packageNames": [
+        "demo-app"
+      ],
+      "workspaceSkew": [],
+      "lockfile": {
+        "path": "package-lock.json",
+        "dialect": "npm-v3",
+        "parseStatus": "parsed",
+        "diagnostics": []
+      },
+      "diagnostics": [],
+      "lockfileDuplicates": [
+        {
+          "name": "semver",
+          "versions": [
+            "6.3.1",
+            "7.6.0"
+          ]
+        }
+      ]
+    }
+  ],
   "packageManager": "npm",
   "lockfileKind": "package-lock.json",
   "totals": {
-    "trackedFiles": 14,
-    "trackedBytes": 2253,
+    "trackedFiles": 15,
+    "trackedBytes": 2301,
     "moduleFiles": 8,
     "packages": 1,
     "declaredDeps": 5
@@ -20,105 +99,142 @@
     {
       "path": ".DS_Store",
       "bytes": 19,
-      "hash": "8aa6468a55f04d67ff52003c381a0d1f55e30bc4",
+      "hash": "5134fc40e856da48bbdb9feed57b6d2254897d23a8630c5f90f24eaef60209cb",
+      "objectId": "5edb4e1f5f0ee63703a005088b42f8efc83745b6",
+      "mode": "100644",
       "ext": "",
       "symlink": false
     },
     {
       "path": ".env",
       "bytes": 31,
-      "hash": "06e4fd31474b06aab9a0fc10cad8520d106ca0c7",
+      "hash": "627e6e93a3d99ab6ff999bd1ae8ca39a54e8a78ad328277b396ae4d1ea249196",
+      "objectId": "490b026069670177cd944189df77c04eaf572b57",
+      "mode": "100644",
+      "ext": "",
+      "symlink": false
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 14,
+      "hash": "ae034b0d579d24a34e3536286017d098731df8f7389e1e6f556b9f7677227589",
+      "objectId": "675070cbad53b2c24885539e26ad259d4e5837d5",
+      "mode": "100644",
       "ext": "",
       "symlink": false
     },
     {
       "path": "assets/old-banner.png",
       "bytes": 38,
-      "hash": "25529bab4a5d359d83268c69903aa7d75cee5497",
+      "hash": "7bfee7b1f18cee550689122727c2cd8f38da0ad6953d2578a111af171dd21bae",
+      "objectId": "9bab67e4238477dd96ef2a7b44705765771e10f8",
+      "mode": "100644",
       "ext": "png",
       "symlink": false
     },
     {
       "path": "debug.log",
       "bytes": 50,
-      "hash": "559dcfdf20dddc0b673646980e0275123b2678b4",
+      "hash": "b30d5979e1585506efe49520a0e7605a69139e50095ba85b64bcd94876356876",
+      "objectId": "dcfea89d65395e848da82d1bbf76bb9ad178de7a",
+      "mode": "100644",
       "ext": "log",
       "symlink": false
     },
     {
       "path": "dist/index.js",
       "bytes": 73,
-      "hash": "8ad0bb35444b6776d0112d0f79fa928171cfb62a",
+      "hash": "780c8ebc5adac07f57959fe45cdb76c9aa538a38e2416c27947226b0410324bd",
+      "objectId": "e4c1faed42f0439d34902ce0ff73aa2238f34c12",
+      "mode": "100644",
       "ext": "js",
       "symlink": false
     },
     {
       "path": "package-lock.json",
       "bytes": 365,
-      "hash": "ed0311211b3c0a2f2c4c06d8b13c90c112eef3a7",
+      "hash": "db3e5cbf2e9f1b1ed6c977ef3c5f06e3a1963fc9bba78ee04f6dc5028707c16d",
+      "objectId": "f341f329f918f78b088bf4c303f4b91ff0468afe",
+      "mode": "100644",
       "ext": "json",
       "symlink": false
     },
     {
       "path": "package.json",
-      "bytes": 326,
-      "hash": "2067d707ba86e8ad28b74d8a4712ed6b381f8b33",
+      "bytes": 360,
+      "hash": "749ff7fb43009ae421f5c167d2106d990213d4b78b3901d20a99e81b951207cd",
+      "objectId": "246695ef80a204fa9cbc1f52600b9f8b7c7a7870",
+      "mode": "100644",
       "ext": "json",
       "symlink": false
     },
     {
       "path": "src/index-old.ts",
       "bytes": 61,
-      "hash": "be4981f9cc9255090b3944cc05d279ced9225423",
+      "hash": "d150743deb6a9b52509bdfa6ad2b4340c44bfb2811fbabba5265befdc451cb10",
+      "objectId": "064c35c78f05fe42ac75c86379046a429be3275a",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/index.ts",
       "bytes": 596,
-      "hash": "0f9377ea282f8926db7a84607fec339070f31f96",
+      "hash": "2082c9d8cf947c180e527c3efe33283ad3d95640670dc9587ea3c51aed4b9a5f",
+      "objectId": "cec5064d338f8b0c583ad9ab440099003badf2dc",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/legacy/engine.ts",
       "bytes": 143,
-      "hash": "270f026a482d674ed61903579fac32101a3a8cdf",
+      "hash": "68f6f0f8cbb747499b38704213b7b154263cf423ad32d54d6f00d7f657c32759",
+      "objectId": "5261232ad9dcbfd65569c493de592503a68c1940",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/legacy/helpers.ts",
       "bytes": 90,
-      "hash": "996bb4031f9257e47c49a4c91a9dee5e06962e9d",
+      "hash": "2b1e47f070aa952ad0d7c4cf75d209279e5f49b1c4bb4c44cb3b16f168f12763",
+      "objectId": "15c75de963beb31ad8d618c3d7d012f7f450f9b1",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/lib/format.ts",
       "bytes": 189,
-      "hash": "a1be984b58dc31f2f340ce225701f942a97c1378",
+      "hash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f",
+      "objectId": "3bcf1adc674f1acd911cae45c0ce06102a3b192c",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/plugins/analytics.ts",
       "bytes": 83,
-      "hash": "258d4cd2fac96498016497da858a2f7f53a681c8",
+      "hash": "b932f2b72ed8a572ebd21be4a787e19fafc6758a633bf201a2de88ae054aefff",
+      "objectId": "a925fd8344e2f0617dc0ed32122e47448ad1a8ab",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/utils/format-copy.ts",
       "bytes": 189,
-      "hash": "a1be984b58dc31f2f340ce225701f942a97c1378",
+      "hash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f",
+      "objectId": "3bcf1adc674f1acd911cae45c0ce06102a3b192c",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     }
   ],
   "duplicateGroups": [
     {
-      "hash": "a1be984b58dc31f2f340ce225701f942a97c1378",
+      "hash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f",
       "bytes": 189,
       "paths": [
         "src/lib/format.ts",
@@ -193,7 +309,82 @@
     "unresolved": [],
     "dynamicImporters": [
       "src/index.ts"
-    ]
+    ],
+    "resolvedEdges": [
+      {
+        "from": "src/index.ts",
+        "specifier": "./lib/format.ts",
+        "source": "static",
+        "context": "runtime",
+        "target": "file",
+        "path": "src/lib/format.ts",
+        "packageName": null
+      },
+      {
+        "from": "src/index.ts",
+        "specifier": "axios",
+        "source": "static",
+        "context": "runtime",
+        "target": "external-package",
+        "path": null,
+        "packageName": "axios"
+      },
+      {
+        "from": "src/index.ts",
+        "specifier": "dayjs",
+        "source": "static",
+        "context": "runtime",
+        "target": "external-package",
+        "path": null,
+        "packageName": "dayjs"
+      },
+      {
+        "from": "src/index.ts",
+        "specifier": "lodash",
+        "source": "static",
+        "context": "runtime",
+        "target": "external-package",
+        "path": null,
+        "packageName": "lodash"
+      },
+      {
+        "from": "src/index.ts",
+        "specifier": "zod",
+        "source": "static",
+        "context": "runtime",
+        "target": "external-package",
+        "path": null,
+        "packageName": "zod"
+      },
+      {
+        "from": "src/legacy/engine.ts",
+        "specifier": "./helpers.ts",
+        "source": "static",
+        "context": "runtime",
+        "target": "file",
+        "path": "src/legacy/helpers.ts",
+        "packageName": null
+      }
+    ],
+    "health": {
+      "status": "incomplete",
+      "diagnostics": [
+        {
+          "code": "graph.dynamic-nonliteral",
+          "severity": "warning",
+          "source": "graph",
+          "message": "src/index.ts contains a non-literal dynamic load; dependency and orphan certainty is reduced for this file.",
+          "affects": [
+            "graph",
+            "dependencies"
+          ],
+          "scope": {
+            "kind": "file",
+            "path": "src/index.ts"
+          }
+        }
+      ]
+    }
   },
   "unreferencedAssets": [
     {
@@ -206,6 +397,27 @@
     {
       "dir": ".",
       "name": "demo-app",
+      "manifest": {
+        "name": "demo-app",
+        "version": "1.0.0",
+        "packageManager": "npm@10.9.0",
+        "main": "src/index.ts",
+        "scripts": {
+          "start": "node src/index.ts"
+        },
+        "dependencies": {
+          "axios": "^1.7.0",
+          "dayjs": "^1.11.0",
+          "moment": "^2.30.0",
+          "left-pad": "^1.3.0",
+          "lodash": "^4.17.21"
+        },
+        "devDependencies": {
+          "lodash": "^4.17.21"
+        }
+      },
+      "projectRoot": ".",
+      "projectKind": "standalone",
       "deps": [
         {
           "name": "axios",
@@ -214,10 +426,19 @@
           "usedBy": [
             "src/index.ts"
           ],
-          "textHits": [
-            "src/index.ts"
+          "textHits": [],
+          "implicitReason": null,
+          "evidence": [
+            {
+              "kind": "import",
+              "path": "src/index.ts",
+              "detail": "resolved import of axios",
+              "context": "runtime"
+            }
           ],
-          "implicitReason": null
+          "contexts": [
+            "runtime"
+          ]
         },
         {
           "name": "dayjs",
@@ -226,10 +447,19 @@
           "usedBy": [
             "src/index.ts"
           ],
-          "textHits": [
-            "src/index.ts"
+          "textHits": [],
+          "implicitReason": null,
+          "evidence": [
+            {
+              "kind": "import",
+              "path": "src/index.ts",
+              "detail": "resolved import of dayjs",
+              "context": "runtime"
+            }
           ],
-          "implicitReason": null
+          "contexts": [
+            "runtime"
+          ]
         },
         {
           "name": "left-pad",
@@ -237,7 +467,9 @@
           "range": "^1.3.0",
           "usedBy": [],
           "textHits": [],
-          "implicitReason": null
+          "implicitReason": null,
+          "evidence": [],
+          "contexts": []
         },
         {
           "name": "lodash",
@@ -246,10 +478,19 @@
           "usedBy": [
             "src/index.ts"
           ],
-          "textHits": [
-            "src/index.ts"
+          "textHits": [],
+          "implicitReason": null,
+          "evidence": [
+            {
+              "kind": "import",
+              "path": "src/index.ts",
+              "detail": "resolved import of lodash",
+              "context": "runtime"
+            }
           ],
-          "implicitReason": null
+          "contexts": [
+            "runtime"
+          ]
         },
         {
           "name": "lodash",
@@ -258,10 +499,19 @@
           "usedBy": [
             "src/index.ts"
           ],
-          "textHits": [
-            "src/index.ts"
+          "textHits": [],
+          "implicitReason": null,
+          "evidence": [
+            {
+              "kind": "import",
+              "path": "src/index.ts",
+              "detail": "resolved import of lodash",
+              "context": "runtime"
+            }
           ],
-          "implicitReason": null
+          "contexts": [
+            "runtime"
+          ]
         },
         {
           "name": "moment",
@@ -269,10 +519,14 @@
           "range": "^2.30.0",
           "usedBy": [],
           "textHits": [],
-          "implicitReason": null
+          "implicitReason": null,
+          "evidence": [],
+          "contexts": []
         }
       ],
-      "unused": [
+      "unused": [],
+      "orphanOnly": [],
+      "uncertain": [
         "left-pad",
         "moment"
       ],
@@ -282,7 +536,11 @@
           "importers": [
             "src/index.ts"
           ],
-          "declaredIn": null
+          "declaredIn": null,
+          "kind": "external",
+          "workspaceTargetDir": null,
+          "suggestedField": null,
+          "suggestedRange": null
         }
       ],
       "dualDeclared": [
@@ -353,98 +611,135 @@
     {
       "path": "src/index.ts",
       "bytes": 596,
-      "hash": "0f9377ea282f8926db7a84607fec339070f31f96",
+      "hash": "2082c9d8cf947c180e527c3efe33283ad3d95640670dc9587ea3c51aed4b9a5f",
+      "objectId": "cec5064d338f8b0c583ad9ab440099003badf2dc",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "package-lock.json",
       "bytes": 365,
-      "hash": "ed0311211b3c0a2f2c4c06d8b13c90c112eef3a7",
+      "hash": "db3e5cbf2e9f1b1ed6c977ef3c5f06e3a1963fc9bba78ee04f6dc5028707c16d",
+      "objectId": "f341f329f918f78b088bf4c303f4b91ff0468afe",
+      "mode": "100644",
       "ext": "json",
       "symlink": false
     },
     {
       "path": "package.json",
-      "bytes": 326,
-      "hash": "2067d707ba86e8ad28b74d8a4712ed6b381f8b33",
+      "bytes": 360,
+      "hash": "749ff7fb43009ae421f5c167d2106d990213d4b78b3901d20a99e81b951207cd",
+      "objectId": "246695ef80a204fa9cbc1f52600b9f8b7c7a7870",
+      "mode": "100644",
       "ext": "json",
       "symlink": false
     },
     {
       "path": "src/lib/format.ts",
       "bytes": 189,
-      "hash": "a1be984b58dc31f2f340ce225701f942a97c1378",
+      "hash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f",
+      "objectId": "3bcf1adc674f1acd911cae45c0ce06102a3b192c",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/utils/format-copy.ts",
       "bytes": 189,
-      "hash": "a1be984b58dc31f2f340ce225701f942a97c1378",
+      "hash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f",
+      "objectId": "3bcf1adc674f1acd911cae45c0ce06102a3b192c",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/legacy/engine.ts",
       "bytes": 143,
-      "hash": "270f026a482d674ed61903579fac32101a3a8cdf",
+      "hash": "68f6f0f8cbb747499b38704213b7b154263cf423ad32d54d6f00d7f657c32759",
+      "objectId": "5261232ad9dcbfd65569c493de592503a68c1940",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/legacy/helpers.ts",
       "bytes": 90,
-      "hash": "996bb4031f9257e47c49a4c91a9dee5e06962e9d",
+      "hash": "2b1e47f070aa952ad0d7c4cf75d209279e5f49b1c4bb4c44cb3b16f168f12763",
+      "objectId": "15c75de963beb31ad8d618c3d7d012f7f450f9b1",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "src/plugins/analytics.ts",
       "bytes": 83,
-      "hash": "258d4cd2fac96498016497da858a2f7f53a681c8",
+      "hash": "b932f2b72ed8a572ebd21be4a787e19fafc6758a633bf201a2de88ae054aefff",
+      "objectId": "a925fd8344e2f0617dc0ed32122e47448ad1a8ab",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "dist/index.js",
       "bytes": 73,
-      "hash": "8ad0bb35444b6776d0112d0f79fa928171cfb62a",
+      "hash": "780c8ebc5adac07f57959fe45cdb76c9aa538a38e2416c27947226b0410324bd",
+      "objectId": "e4c1faed42f0439d34902ce0ff73aa2238f34c12",
+      "mode": "100644",
       "ext": "js",
       "symlink": false
     },
     {
       "path": "src/index-old.ts",
       "bytes": 61,
-      "hash": "be4981f9cc9255090b3944cc05d279ced9225423",
+      "hash": "d150743deb6a9b52509bdfa6ad2b4340c44bfb2811fbabba5265befdc451cb10",
+      "objectId": "064c35c78f05fe42ac75c86379046a429be3275a",
+      "mode": "100644",
       "ext": "ts",
       "symlink": false
     },
     {
       "path": "debug.log",
       "bytes": 50,
-      "hash": "559dcfdf20dddc0b673646980e0275123b2678b4",
+      "hash": "b30d5979e1585506efe49520a0e7605a69139e50095ba85b64bcd94876356876",
+      "objectId": "dcfea89d65395e848da82d1bbf76bb9ad178de7a",
+      "mode": "100644",
       "ext": "log",
       "symlink": false
     },
     {
       "path": "assets/old-banner.png",
       "bytes": 38,
-      "hash": "25529bab4a5d359d83268c69903aa7d75cee5497",
+      "hash": "7bfee7b1f18cee550689122727c2cd8f38da0ad6953d2578a111af171dd21bae",
+      "objectId": "9bab67e4238477dd96ef2a7b44705765771e10f8",
+      "mode": "100644",
       "ext": "png",
       "symlink": false
     },
     {
       "path": ".env",
       "bytes": 31,
-      "hash": "06e4fd31474b06aab9a0fc10cad8520d106ca0c7",
+      "hash": "627e6e93a3d99ab6ff999bd1ae8ca39a54e8a78ad328277b396ae4d1ea249196",
+      "objectId": "490b026069670177cd944189df77c04eaf572b57",
+      "mode": "100644",
       "ext": "",
       "symlink": false
     },
     {
       "path": ".DS_Store",
       "bytes": 19,
-      "hash": "8aa6468a55f04d67ff52003c381a0d1f55e30bc4",
+      "hash": "5134fc40e856da48bbdb9feed57b6d2254897d23a8630c5f90f24eaef60209cb",
+      "objectId": "5edb4e1f5f0ee63703a005088b42f8efc83745b6",
+      "mode": "100644",
+      "ext": "",
+      "symlink": false
+    },
+    {
+      "path": ".gitignore",
+      "bytes": 14,
+      "hash": "ae034b0d579d24a34e3536286017d098731df8f7389e1e6f556b9f7677227589",
+      "objectId": "675070cbad53b2c24885539e26ad259d4e5837d5",
+      "mode": "100644",
       "ext": "",
       "symlink": false
     }

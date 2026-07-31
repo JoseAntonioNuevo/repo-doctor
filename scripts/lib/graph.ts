@@ -2,13 +2,15 @@ import { posix } from "node:path";
 import type {
   EntryPoint,
   FileInfo,
+  ImportContext,
   ModuleGraph,
   OrphanModule,
   PackageManifest,
+  ResolvedImportEdge,
   UnresolvedImport,
 } from "./types.ts";
 import { extractImports, isModuleFile } from "./imports.ts";
-import { resolveSpecifier } from "./resolve.ts";
+import { resolveSpecifier, workspacePackageFor } from "./resolve.ts";
 import type { TsPathsConfig, WorkspacePkg } from "./resolve.ts";
 
 /**
@@ -50,6 +52,80 @@ function isGraphModuleFile(path: string): boolean {
   return isModuleFile(path) || SFC_RE.test(path);
 }
 
+function contextOf(path: string): ImportContext {
+  const base = path.slice(path.lastIndexOf("/") + 1);
+  const segments = path.split("/");
+  if (/\.(test|spec)\./.test(base) || segments.some((segment) => TEST_SEGMENTS.has(segment))) return "test";
+  if (/\.(config|rc)\.[cm]?[jt]s$/.test(base) || /^\.?\w+rc\./.test(base)) return "config";
+  if (OPS_PREFIXES.some((prefix) => path.startsWith(prefix))) return "tooling";
+  if (path.endsWith(".d.ts")) return "type-only";
+  return "runtime";
+}
+
+function globRegex(pattern: string): RegExp {
+  let out = "^";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i];
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        i += 1;
+        out += ".*";
+      } else out += "[^/]*";
+    } else if (ch === "?") out += "[^/]";
+    else out += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`${out}$`);
+}
+
+function vitePatternCandidates(raw: string, tsPaths: TsPathsConfig | null): string[] {
+  const pattern = raw.replace(/^!/, "");
+  if (pattern.startsWith(".") || pattern.startsWith("/")) return [pattern];
+  if (tsPaths !== null) {
+    for (const [alias, targets] of Object.entries(tsPaths.paths)) {
+      const star = alias.indexOf("*");
+      const prefix = star === -1 ? alias : alias.slice(0, star);
+      const suffix = star === -1 ? "" : alias.slice(star + 1);
+      if (!pattern.startsWith(prefix) || !pattern.endsWith(suffix)) continue;
+      const value = star === -1 ? "" : pattern.slice(prefix.length, pattern.length - suffix.length);
+      return targets.map((target) => target.replace("*", value));
+    }
+    if (tsPaths.baseUrl !== null) return [posix.join(tsPaths.baseUrl, pattern)];
+  }
+  return [pattern];
+}
+
+function expandViteGlobs(from: string, patterns: string[], files: string[], tsPaths: TsPathsConfig | null): string[] {
+  const selected = new Set<string>();
+  for (const raw of patterns.filter((pattern) => !pattern.startsWith("!"))) {
+    for (const candidate of vitePatternCandidates(raw, tsPaths)) {
+      const rooted = candidate.startsWith("/")
+        ? candidate.slice(1)
+        : candidate.startsWith(".")
+          ? posix.normalize(posix.join(posix.dirname(from), candidate))
+          : candidate;
+      const regex = globRegex(rooted.replace(/^\.\//, ""));
+      for (const file of files) {
+        if (!regex.test(file)) continue;
+        selected.add(file);
+      }
+    }
+  }
+  for (const raw of patterns.filter((pattern) => pattern.startsWith("!"))) {
+    for (const candidate of vitePatternCandidates(raw, tsPaths)) {
+      const rooted = candidate.startsWith("/")
+        ? candidate.slice(1)
+        : candidate.startsWith(".")
+          ? posix.normalize(posix.join(posix.dirname(from), candidate))
+          : candidate;
+      const regex = globRegex(rooted.replace(/^\.\//, ""));
+      for (const file of files) {
+        if (regex.test(file)) selected.delete(file);
+      }
+    }
+  }
+  return [...selected].sort();
+}
+
 /**
  * Build the import graph and reachability report.
  *
@@ -77,10 +153,12 @@ export function buildModuleGraph(input: GraphInput): {
 
   // A file that vanished between the inventory pass and this read parses as
   // empty — one racy file must not kill the scan.
+  const readFailures = new Set<string>();
   const readSource = (path: string): string => {
     try {
       return input.readFile(path);
     } catch {
+      readFailures.add(path);
       return "";
     }
   };
@@ -103,23 +181,89 @@ export function buildModuleGraph(input: GraphInput): {
   const importsByFile = new Map<string, string[]>();
   const unresolvedByFile = new Map<string, string[]>();
   const dynamicImporters: string[] = [];
+  const resolvedEdges: ResolvedImportEdge[] = [];
+  const graphDiagnostics: ModuleGraph["health"]["diagnostics"] = [];
   const shebangFiles = new Set<string>();
   for (const path of moduleFiles) {
     const source = readSource(path);
     if (source.startsWith("#!")) shebangFiles.add(path);
-    const { specifiers, hasDynamicNonLiteral } = extractImports(source);
+    const { specifiers, hasDynamicNonLiteral, dynamicSpecifiers, typeOnlySpecifiers, referenceSpecifiers, viteGlobs } = extractImports(source);
     importsByFile.set(path, specifiers);
-    if (hasDynamicNonLiteral) dynamicImporters.push(path);
+    if (hasDynamicNonLiteral) {
+      dynamicImporters.push(path);
+      graphDiagnostics.push({
+        code: "graph.dynamic-nonliteral",
+        severity: "warning",
+        source: "graph",
+        message: `${path} contains a non-literal dynamic load; dependency and orphan certainty is reduced for this file.`,
+        affects: ["graph", "dependencies"],
+        scope: { kind: "file", path },
+      });
+    }
     const internal = new Set<string>();
     const unresolved: string[] = [];
     const tsPaths = tsPathsFor(path);
     for (const spec of specifiers) {
       const res = resolveSpecifier(path, spec, fileSet, tsPaths, input.workspacePkgs);
-      if (res.kind === "internal") internal.add(res.path);
-      else if (res.kind === "unresolved") unresolved.push(spec);
+      const workspace = workspacePackageFor(path, spec, input.workspacePkgs);
+      const sourceKind = referenceSpecifiers.includes(spec)
+        ? "reference"
+        : dynamicSpecifiers.includes(spec)
+          ? "dynamic-literal"
+          : "static";
+      const importContext = typeOnlySpecifiers.includes(spec) ? "type-only" as const : contextOf(path);
+      if (res.kind === "internal") {
+        internal.add(res.path);
+        resolvedEdges.push({
+          from: path,
+          specifier: spec,
+          source: sourceKind,
+          context: importContext,
+          target: workspace ? "workspace-package" : "file",
+          path: res.path,
+          packageName: workspace?.name ?? null,
+        });
+      } else if (res.kind === "unresolved") {
+        unresolved.push(spec);
+        resolvedEdges.push({ from: path, specifier: spec, source: sourceKind, context: importContext, target: "unresolved", path: null, packageName: null });
+      } else if (res.kind === "package") {
+        resolvedEdges.push({
+          from: path,
+          specifier: spec,
+          source: sourceKind,
+          context: importContext,
+          target: workspace ? "workspace-package" : "external-package",
+          path: null,
+          packageName: res.name,
+        });
+      } else {
+        resolvedEdges.push({ from: path, specifier: spec, source: sourceKind, context: importContext, target: "builtin", path: null, packageName: null });
+      }
+    }
+    for (const target of expandViteGlobs(path, viteGlobs, moduleFiles, tsPaths)) {
+      internal.add(target);
+      resolvedEdges.push({
+        from: path,
+        specifier: target,
+        source: "vite-glob",
+        context: contextOf(path),
+        target: "file",
+        path: target,
+        packageName: null,
+      });
     }
     edges.set(path, [...internal].sort());
     unresolvedByFile.set(path, unresolved);
+  }
+  for (const path of readFailures) {
+    graphDiagnostics.push({
+      code: "graph.source-unreadable",
+      severity: "error",
+      source: "graph",
+      message: `${path} could not be read from the worktree or Git index; graph analysis is blocked for this file.`,
+      affects: ["graph", "dependencies"],
+      scope: { kind: "file", path },
+    });
   }
   for (const path of htmlFiles) edges.set(path, htmlEdges(path, readSource(path), fileSet));
 
@@ -176,7 +320,15 @@ export function buildModuleGraph(input: GraphInput): {
   );
 
   return {
-    graph: { moduleFiles, entrypoints, orphans, unresolved, dynamicImporters },
+    graph: {
+      moduleFiles,
+      entrypoints,
+      orphans,
+      unresolved,
+      dynamicImporters,
+      resolvedEdges: resolvedEdges.sort((a, b) => cmp(a.from, b.from) || cmp(a.specifier, b.specifier)),
+      health: { status: graphDiagnostics.length > 0 ? "incomplete" : "complete", diagnostics: graphDiagnostics },
+    },
     importsByFile,
   };
 }

@@ -2,342 +2,231 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/JoseAntonioNuevo/repo-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/JoseAntonioNuevo/repo-doctor/actions/workflows/ci.yml)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![Node >= 20](https://img.shields.io/badge/node-%3E%3D20-blue.svg)](package.json)
+[![Node >= 22.13](https://img.shields.io/badge/node-%3E%3D22.13-blue.svg)](package.json)
 [![Agent Skill](https://img.shields.io/badge/agent%20skill-SKILL.md-8A2BE2)](SKILL.md)
 
-An [agent skill](https://agentskills.io) + standalone CLI scripts that
-**audit and slim bloated repositories** — dead modules, byte-identical
-duplicates, committed junk, unreferenced assets, and dependency bloat — with
-an evidence-driven removal plan computed from the import graph and the
-manifests, not gut feeling, and verified afterwards against the repo's own
-build and test gates.
+An agent skill and standalone CLI for finding dead modules, committed junk,
+duplicate files, unreferenced assets, unused dependencies, undeclared
+workspace imports, version skew, and lockfile drift without deleting by guess.
 
-Works with **Claude Code, Codex, Cursor, Grok build, and any agent that can
-read a markdown file and run a CLI** — and with no agent at all: the scripts
-are plain `npx tsx` CLIs you can run by hand or in CI.
+Repo Doctor 0.2.0 is deliberately conservative: the scan records evidence,
+the plan starts every concrete mutation as pending, a reviewer approves exact
+item IDs, and verification accepts only the reviewed mutations.
 
----
+## Requirements and installation
 
-## The problem: repo bloat
-
-Repositories grow in only one direction. AI-assisted development and years of
-drift leave the same sediment everywhere: committed `dist/` and coverage
-output, `utils-old.ts` next to `utils.ts`, whole module clusters nothing
-imports anymore, the same image copied into four folders, a dependency
-graveyard where moment, dayjs, AND date-fns are all declared and one is used.
-Every clone, install, review, and grep pays for all of it — and a committed
-`.env` in the pile is not bloat but an incident.
-
-Prompting an LLM "delete the unused stuff" cannot fix this — it has no import
-graph, no per-manifest usage data, and no idea which deletion breaks the
-build. Deterministic scripts collect the evidence and compute the plan; the
-agent's judgment is reserved for the two places it is genuinely needed:
-rescuing files and deps whose usage static analysis can't see, and executing
-the cleanup safely on a branch.
-
-## How it works
-
-```
-┌─ 1. SCAN ────────────────┐   ┌─ 2. PLAN ────────────────┐   ┌─ 3. REVIEW ──────────────┐
-│ scripts/scan.ts          │   │ scripts/plan.ts          │   │ agent judgment +         │
-│ import graph, dep usage, │──▶│ findings → actions with  │──▶│ references/              │
-│ junk, dups, assets       │   │ confidence tiers         │   │ false-positives.md       │
-│ → report.json            │   │ → plan.json / plan.md    │   │ rescue / classify        │
-└──────────────────────────┘   └──────────────────────────┘   └────────────┬─────────────┘
-                                                                           │ git rm on a branch
-┌─ 5. VERIFY ──────────────┐   ┌─ 4. CLEAN ───────────────┐                │
-│ scripts/verify.ts        │◀──│ agent judgment           │◀───────────────┘
-│ re-scan: no regressions, │   │ git rm / git rm --cached │
-│ install/build/test       │   │ <pm> remove, .gitignore  │
-│ gates green              │   │ never rm -rf             │
-└──────────────────────────┘   └──────────────────────────┘
-```
-
-1. **SCAN** (script) — lists git-tracked files, hashes them, builds the
-   module graph from entrypoint conventions (package.json fields, framework
-   routes, configs, tests…), analyzes per-manifest dependency usage, parses
-   the lockfile, and flags junk, duplicates, and unreferenced assets into a
-   machine-readable report.
-2. **PLAN** (script) — maps findings to concrete actions (`delete-file`,
-   `untrack-and-gitignore`, `remove-dep`, `align-versions`, …), each with a
-   confidence tier and one-line evidence. Deterministic: same report + same
-   flags ⇒ the same plan, byte for byte (minus the `createdAt` timestamp).
-3. **REVIEW** (agent/human) — nothing is deleted automatically. Candidates
-   are checked against the [false-positive guide](references/false-positives.md)
-   (dynamic imports, string references, CLI-only deps…); live ones get
-   rescued with `--keep`. The [bloat-pattern catalog](references/bloat-patterns.md)
-   names *why* each survivor dies.
-4. **CLEAN** (agent/human) — on a clean branch, via git only: `git rm`,
-   `git rm --cached` + `.gitignore`, `<pm> remove`. Sensitive files are
-   never deleted — reported for credential rotation instead.
-5. **VERIFY** (script) — re-scans with the baseline's recorded scan flags and
-   diffs against it (new unresolved imports or missing deps = regressions),
-   then runs the repo's own install/typecheck/build/test scripts. Non-zero
-   exit on failure, so it can gate CI.
-
-## Example: before / after
-
-Output from the bundled demo (`examples/`) — a fixture repo with planted
-bloat: a committed `dist/` and a stray log, an orphan module cluster, a
-byte-duplicate file, an `-old` copy, unused deps, a dual-declared dep, and a
-multi-version lockfile entry. (Numbers below are regenerated with the demo;
-see [examples/demo-plan.md](examples/demo-plan.md) for the full plan.)
-
-| Metric | Before | After (planned) |
-|---|---:|---:|
-| Tracked files | 14 | **7** |
-| Tracked size | 2.2 KB | 1.6 KB |
-| Declared dependencies | 5 | 4 |
-| Reclaimable bytes | — | 625 B |
-
-Plan excerpt — every item carries its action, confidence, and evidence
-(evidence quoted verbatim from the generated plan):
-
-| Target | Action | Confidence | Evidence |
-|---|---|---|---|
-| `dist/index.js` | untrack-and-gitignore | high | committed build artifact (build output directory "dist", 73 bytes) — belongs in .gitignore, … |
-| `src/index-old.ts` | delete-file | high | unreachable from the only entrypoint; the filename also marks it as a backup copy |
-| `src/legacy/engine.ts` | delete-file | medium | unreachable from the only entrypoint; repo has dynamic imports — verify none loads this file |
-| `left-pad` | remove-dep | medium | declared in dependencies (^1.3.0) with no usage evidence — runtime loading can hide usage, … |
-
-And two deliberately planted teaching cases show why step 3 (REVIEW) exists:
-
-- `moment` **and** `dayjs` in one manifest — the scripts flag the overlap but
-  only ever *suggest* consolidating; picking the survivor and migrating call
-  sites is the review phase's job.
-- a dynamically imported module — **looks orphaned**, because
-  `import(computed)` is invisible to the static graph. The report's
-  `dynamicImporters` field downgrades its confidence, and the review phase
-  rescues it.
-
-Try it yourself, no target repo needed:
+- Node.js `>=22.13`
+- Git
+- No runtime npm dependencies
+- A clean Git baseline before generating a mutation-capable plan
 
 ```bash
-git clone https://github.com/JoseAntonioNuevo/repo-doctor.git
-cd repo-doctor
-npx tsx scripts/plan.ts --report examples/demo-report.json \
-  --out-plan /tmp/plan.json --out-md /tmp/plan.md --keep 'plugins/'
+git clone https://github.com/JoseAntonioNuevo/repo-doctor.git ~/skills/repo-doctor
+REPO_DOCTOR_ROOT="$HOME/skills/repo-doctor"
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-scan.mjs" --help
 ```
 
-## Installation
+Clone it into your agent's skills directory if that agent supports skill
+discovery. The directory must be named `repo-doctor` so `SKILL.md` and the
+installation path agree.
 
-The skill is a plain folder — `SKILL.md` (the workflow) + `scripts/`
-(deterministic CLIs) + `references/` (judgment guides). Installing it
-anywhere is "put the folder where your tool looks for it."
+## Safety model
 
-### Claude Code
+The v2 workflow binds three things:
+
+1. `report.json` records the Git repository identity, baseline HEAD, index,
+   tracked-file inventory, scan options, analysis health, and diagnostics.
+2. `plan.json` hashes the exact report bytes and records exact file hashes or
+   manifest fields/ranges for every possible mutation. Items remain `pending`
+   until their exact IDs are approved.
+3. `verify.json` proves that every disappearance and dependency edit was
+   authorized, protected files remained unchanged, and no new orphan,
+   unresolved import, missing declaration, or degraded analysis capability
+   appeared.
+
+Artifacts are bounded, non-symlink regular files. Outputs are written through
+an exclusive same-directory temporary file and atomic rename. Repo Doctor
+rejects symlinked parents, tracked artifact destinations, path collisions, and
+paths outside the target unless `--allow-output-outside-cwd` is explicit.
+
+Version-1 reports and plans are not accepted. Re-run scan and plan with 0.2.0.
+
+## Workflow
+
+Set the installation and target once. Both values are quoted, so paths with
+spaces are safe.
 
 ```bash
-# user-level (all projects)
-git clone https://github.com/JoseAntonioNuevo/repo-doctor.git \
-  ~/.claude/skills/repo-doctor
-
-# or project-level (this repo only)
-git clone https://github.com/JoseAntonioNuevo/repo-doctor.git \
-  .claude/skills/repo-doctor
+REPO_DOCTOR_ROOT="$HOME/skills/repo-doctor"
+TARGET_REPO="/path/to/target repo"
 ```
 
-Or with the [skills CLI](https://github.com/vercel-labs/skills), which also
-targets other compatible tools:
+### 1. Scan
 
 ```bash
-npx skills add JoseAntonioNuevo/repo-doctor
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-scan.mjs" --cwd "$TARGET_REPO"
 ```
 
-Then just ask: *"clean up this repo"*, *"find unused dependencies"*, *"remove
-dead files"*. Claude Code auto-discovers the skill from its description.
-Update later with `git -C ~/.claude/skills/repo-doctor pull`.
+The scanner reads Git-tracked state, including sparse-checkout files from the
+index. It discovers declared workspaces, independent nested projects, and
+unmanaged manifests; resolves TypeScript/JavaScript aliases, `baseUrl`,
+multi-level `extends`, package `imports`/`exports`, literal dynamic imports,
+and Vite globs; and records scoped diagnostics when analysis is incomplete.
 
-### Codex / OpenAI agents
-
-Clone the repo anywhere (e.g. `~/skills/repo-doctor`) and point the agent at
-it from your `AGENTS.md`:
-
-```markdown
-## Repository cleanup
-When asked to clean up, slim, or audit the repository, read
-~/skills/repo-doctor/SKILL.md and follow its workflow exactly.
-Its scripts run standalone: `npx tsx ~/skills/repo-doctor/scripts/<name>.ts --help`.
-```
-
-Codex also supports the skills folder convention directly (`~/.codex/skills/`
-in recent versions) — clone there and it is discovered like any other skill.
-
-### Cursor
-
-Clone the repo into your project (e.g. `tools/repo-doctor`, matching the
-rule below) and add a rule (`.cursor/rules/repo-doctor.mdc`, or
-Settings → Rules):
-
-```
-When the user asks to clean up the repo, remove dead files, or audit
-dependencies, read tools/repo-doctor/SKILL.md and follow its workflow.
-Always run its scan and plan scripts before proposing any deletion.
-```
-
-### Grok build and other agentic tools
-
-Any tool that can read files and run shell commands can use this skill. Wire
-it into the tool's custom-instructions mechanism with one line:
-
-> Read `<path>/SKILL.md` and follow it when working on repository health.
-
-The core workflow intentionally uses **no vendor-specific features** — no
-Claude-Code-only frontmatter beyond the standard `name`/`description`, no MCP
-servers, no tool-specific commands.
-
-### No agent at all (human / CI)
-
-The scripts are self-contained CLIs — Node ≥ 20, zero runtime dependencies
-(`npx tsx` fetches the TypeScript runner on demand; `pnpm dlx tsx` works the
-same if you prefer pnpm):
-
-```bash
-npx tsx scripts/scan.ts --cwd /path/to/repo
-npx tsx scripts/plan.ts --report /path/to/repo/.repo-doctor/report.json
-npx tsx scripts/verify.ts --cwd /path/to/repo
-```
-
-`verify.ts` exits non-zero on regressions or failing gates, so it drops
-straight into a CI job as a guard after any large cleanup PR.
-
-## CLI reference
-
-Every script supports `--help`. The important knobs:
-
-### `scripts/scan.ts` — SCAN
+Useful scan flags:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--cwd` | `.` | Target repo root (must be a git repository) |
-| `--out` | `.repo-doctor/report.json` | Report path |
-| `--ignore <regex>` | — | Drop matching tracked paths from all analysis (repeatable) |
-| `--entry <path>` | — | Extra entrypoint the conventions miss (repeatable) |
-| `--large-count` | `20` | How many largest files to report |
-| `--min-dup-bytes` | `1` | Minimum file size for duplicate grouping |
-| `--concurrency` | `8` | Parallel file reads/hashes |
+| `--out` | `.repo-doctor/report.json` | v2 report path |
+| `--ignore <regex>` | — | Exclude a tracked path from every analysis capability; repeatable |
+| `--entry <path>` | — | Add a dynamically/framework-loaded graph root; repeatable |
+| `--large-count` | `20` | Number of largest files to report |
+| `--min-dup-bytes` | `1` | Smallest duplicate candidate |
+| `--concurrency` | `8` | Concurrent tracked-file reads |
 
-Analyzes **git-tracked files only** (`git ls-files`) — untracked and ignored
-files are already not the repo's problem. Not a git repo ⇒ exit 2.
+### 2. Generate and review a draft plan
 
-### `scripts/plan.ts` — PLAN
+```bash
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-plan.mjs" --cwd "$TARGET_REPO"
+```
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--report` | `.repo-doctor/report.json` | Scan report to plan from |
-| `--out-plan` | `.repo-doctor/plan.json` | Plan JSON path |
-| `--out-md` | `.repo-doctor/plan.md` | Human-readable plan path |
-| `--keep <regex>` | — | Rescue matching items — kept in the plan, marked `rescued` (repeatable) |
-| `--min-confidence` | `low` | Lowest tier to include: `low` \| `medium` \| `high` |
+Read `.repo-doctor/plan.md` and the guides in
+[`references/false-positives.md`](references/false-positives.md) and
+[`references/bloat-patterns.md`](references/bloat-patterns.md).
 
-### `scripts/verify.ts` — VERIFY
+- `proposed`: concrete high-confidence mutation, still pending approval.
+- `manual`: concrete medium-risk mutation requiring deeper review.
+- `review-only`: advisory finding without an executable mutation.
+- `deferred`: requires an approved file cleanup and a fresh scan first.
+- `blocked`: sensitive or affected by incomplete/ambiguous analysis.
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `--cwd` | `.` | Target repo root |
-| `--baseline` | `.repo-doctor/report.json` | Pre-cleanup scan to diff against |
-| `--out` | `.repo-doctor/verify.json` | Verdict path |
-| `--skip-install` / `--skip-typecheck` / `--skip-build` / `--skip-test` | off | Skip that gate |
-| `--gate <cmd>` | — | Custom gate command; replaces the script gates (repeatable) |
-| `--timeout-ms` | `600000` | Per-gate timeout |
-| `--ignore <regex>` | baseline's | ADD an ignore pattern to the re-scan (repeatable) |
-| `--entry <path>` | baseline's | ADD a module-graph entrypoint to the re-scan (repeatable) |
+Keep known-live items and approve exact IDs by regenerating the plan:
 
-The re-scan replays the `--ignore`/`--entry` options recorded in the baseline
-report, so both scans measure with the same instrument — the flags here only
-add to that set (older baselines without recorded options re-scan with the
-flags given here, plus a warning). The install gate deliberately allows a
-lockfile update (`pnpm install --no-frozen-lockfile`, Yarn with immutable
-installs off): the cleanup just edited manifests, and a frozen-lockfile
-failure would go red before any regression is measured.
+```bash
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-plan.mjs" \
+  --cwd "$TARGET_REPO" \
+  --keep '^migrations/' \
+  --approve 'delete-file:src/obsolete.ts'
+```
 
-Exit codes: `0` pass · `1` regressions found / gates red · `2` environment
-error.
+`--keep` wins over `--approve`. `--allow-delete <exact-path>` is the explicit
+exception for a reviewed entrypoint/reachable file. Sensitive paths can never
+be approved or allowed; rotate/remediate them separately, then create a new
+baseline.
 
-## How detection works
+### 3. Apply only approved mutations
 
-- **Dead modules** — the scan builds an import graph over every tracked JS/TS
-  file, plus `.vue`/`.svelte`/`.astro` SFCs whose script blocks import like
-  any module (a comment-aware extractor handles `import`/`export from`/
-  `require`/dynamic `import()`/reference directives; resolution understands
-  extension guessing, `index.*`, ESM `.js`→`.ts` rewrites, per-package
-  tsconfig `paths` — each workspace package's own tsconfig owns its aliases —
-  and workspace packages). Entrypoints come from conventions: package.json
-  `main`/`module`/`exports`/`bin` and script references, framework route
-  dirs, config files, tests, stories, declarations, ops dirs, and tracked
-  HTML. BFS from all entrypoints; what is never reached is an orphan.
-- **Honest uncertainty** — any non-literal `import()`/`require()` puts its
-  file in `dynamicImporters` and downgrades orphan confidence; unresolved
-  specifiers are reported from reachable files only, so orphan noise doesn't
-  drown them; an orphan whose path appears in a tracked text file or that
-  starts with a shebang is demoted to a review item with that evidence cited.
-- **One path, one instruction** — the planner's passes share a single claims
-  set; the first pass to claim a path owns its instruction, so a file can
-  never collect contradictory actions.
-- **Dependency usage** — per manifest (workspace-aware): a dep is used if the
-  manifest's own files import it, a tracked text file mentions it as a whole
-  word, or an implicit rule applies (`@types/*` pairing, a bin-name catalog
-  for CLIs like `tsc` → typescript, eslint/babel/prettier config shorthand,
-  workspace packages). Everything else is unused; imported-but-undeclared is
-  reported as missing, with hoisting evidence.
-- **Junk, duplicates, assets** — first-match category rules for build
-  artifacts, logs, caches, OS/editor droppings, backups, archives, generated
-  bundles, and env/key files (report-only); sha1 groups for byte-identical
-  duplicates (survivor picked by reachability evidence); a basename
-  reference-search across text files for image/font/media assets. Symlinks
-  are recorded as links and are never deletion candidates.
-- **Lockfile** — light dependency-free parsers (line-based for pnpm-lock v6
-  and v9+ and yarn classic, plain JSON for package-lock) surface
-  multi-version duplicates without any YAML library.
+Use Git-aware operations on a branch:
 
-Everything the static analysis can't see is pushed to the explicit REVIEW
-step: that split — deterministic scripts for measurable facts, judgment for
-conventions and intent — is the design center of the whole skill.
+```bash
+git switch -c repo-doctor/cleanup
+git rm -- src/obsolete.ts
+git rm --cached -- dist/app.js
+```
 
-## Artifacts
+Do not apply deferred dependency changes in this pass. After approved orphan
+files are removed, run scan and plan again; the fresh graph may then prove a
+dependency unused.
 
-All artifacts land under `.repo-doctor/` (gitignore it) — versioned JSON,
-plus a human-readable markdown plan:
+### 4. Static verification (default)
 
-- `report.json` — files, hashes, module graph (entrypoints, orphans,
-  unresolved, dynamic importers), per-package dependency usage, junk,
-  duplicates, assets, lockfile duplicates, warnings.
-- `plan.json` / `plan.md` — one item per action with target, confidence,
-  evidence, reclaimable bytes, and rescue markers; the markdown version ends
-  with the cleanup command templates.
-- `report.after.json` / `verify.json` — the post-cleanup scan and the
-  verdict: gates, regressions, before/after comparison.
+```bash
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-verify.mjs" --cwd "$TARGET_REPO"
+```
+
+Static verification executes no target code and reports
+`STATIC VERIFY PASSED`. Verify-time `--ignore` and `--entry` may only repeat
+values already bound into the baseline; additions are rejected because they
+would change the measurement.
+
+### 5. Trusted gates (explicit opt-in)
+
+```bash
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-verify.mjs" \
+  --cwd "$TARGET_REPO" \
+  --run-gates --trust-repo
+```
+
+Trusted mode performs a frozen install for each discovered JavaScript project
+and runs declared `typecheck`, `check`, `lint`, `build`, `test`, and `validate`
+scripts. Root scripts take precedence over member scripts with the same name.
+
+| Manager | Frozen install |
+|---|---|
+| pnpm | `pnpm install --frozen-lockfile` |
+| npm | `npm ci` |
+| Yarn Classic | `yarn install --frozen-lockfile` |
+| Yarn Berry | `yarn install --immutable` |
+| Bun | `bun install --frozen-lockfile` |
+
+Repo Doctor never defaults an unknown project to npm. Non-JavaScript or
+unsupported projects stay static-only unless you provide a trusted custom
+`--gate`.
+
+Gate processes receive a minimal environment, ephemeral home, and `CI=true`.
+Use repeatable `--pass-env NAME` or the explicit `--inherit-env` escape hatch.
+Only names are recorded. Environment scrubbing is not a sandbox; run untrusted
+repositories in a disposable VM or container.
+
+## Project and dependency behavior
+
+- Only members matched by tracked workspace declarations belong to a
+  workspace. A nested manifest with its own tracked manager/lockfile is a
+  standalone project; an unmatched manifest without a boundary is unmanaged
+  and dependency mutation is blocked.
+- Dependency evidence is scoped to its owning package/project. Sibling scripts
+  and configs do not rescue another package's declaration.
+- Resolved graph edges—not raw string reinterpretation—distinguish aliases,
+  private `#imports`, workspace packages, external packages, and builtins.
+- Undeclared workspace imports are missing internal declarations; they are not
+  silently treated as available through the workspace or hoisting.
+- A sole unused dev dependency in a complete scope can be proposed at high
+  confidence. Runtime dependencies are manual; peer/optional and multi-field
+  declarations are review-only or manual. Dynamic loading reduces certainty.
+- External missing dependencies never receive an invented version range.
+- Lockfile parsing reports `parsed`, `unsupported`, or `invalid`; corrupt or
+  unknown lockfiles never become an empty successful result.
+
+## Lockfile support
+
+Repo Doctor detects tracked npm, pnpm, Yarn, and Bun lockfiles. Duplicate
+version analysis supports npm lockfile v1-v3 and shrinkwrap, supported pnpm
+dialects, Yarn Classic, Yarn Berry, aliases, scoped packages, and CRLF input.
+Bun is supported for manager/gate selection; unsupported Bun lock dialects
+are explicit diagnostics and block lockfile advice.
+
+## Exit codes
+
+- `0`: requested report/plan written, or verification passed.
+- `1`: authorization, protected-state, graph/dependency/health regression, or
+  selected gate failure.
+- `2`: usage error, legacy/malformed artifact, unsafe path, wrong/stale
+  repository binding, unsupported automatic gate, or missing trust.
+
+## Development
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm test
+pnpm check:generated
+```
+
+The committed `bin/*.mjs` files are deterministic Node 22 ESM bundles. CI
+rebuilds them and fails if the generated files differ. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Limitations
 
-- **JS/TS module graph only** (for now). Junk, duplicate, and asset detection
-  work in any git repo, but imports in other languages are not parsed —
-  orphan analysis covers `js/jsx/ts/tsx/mjs/cjs/mts/cts` plus the script
-  blocks of `.vue`/`.svelte`/`.astro` files.
-- **Static analysis is static.** Computed `import()` paths, plugin
-  registries, and CMS-referenced assets are invisible — that's why
-  confidence tiers, `dynamicImporters`, and the REVIEW step exist. Don't
-  skip them.
-- Dependency text-matching is whole-word: a dep referenced only through a
-  constructed string can still look unused. `--keep` is the escape hatch and
-  [false-positives.md](references/false-positives.md) the checklist.
-- Lockfile parsers cover pnpm, npm, and yarn classic; exotic dialects skip
-  unparseable lines rather than fail.
-- **Git history is not rewritten.** Deleting a giant binary today shrinks no
-  clone — the catalog's [pattern #11](references/bloat-patterns.md#11-giant-binaries-in-git-history)
-  points at git-filter-repo/BFG, deliberately out of automated scope.
-- Custom `--gate` commands are split on whitespace — no shell quoting.
+- Module reachability currently targets JavaScript/TypeScript and supported
+  component-file script blocks. Other repositories still receive Git
+  inventory, junk, duplicate, asset, and static authorization checks.
+- Static analysis cannot prove arbitrary computed loaders, runtime plugin
+  registries, CMS references, reflection, or generated code. Affected scopes
+  become uncertain, deferred, or blocked instead of producing high-confidence
+  deletion advice.
+- Repo Doctor does not automatically edit or delete target files. The plan is
+  an auditable authorization document, not a mutation engine.
 
-## Contributing
-
-Bug reports, new bloat patterns for the catalog, new bin mappings and overlap
-families, and new lockfile dialects are all welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md) (development is pnpm-first:
-`pnpm install --frozen-lockfile && pnpm test && pnpm typecheck`). Found a new
-bloat pattern in the wild?
-[File it with the dedicated issue template](https://github.com/JoseAntonioNuevo/repo-doctor/issues/new?template=bloat-pattern.yml).
-
-## License
-
-[MIT](LICENSE) © Jose Antonio Nuevo
+MIT licensed.

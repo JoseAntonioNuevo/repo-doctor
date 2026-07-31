@@ -16,16 +16,22 @@ import type {
 } from "../scripts/lib/types.ts";
 
 function graph(over: Partial<RepoReport["graph"]> = {}): RepoReport["graph"] {
-  return { moduleFiles: [], entrypoints: [], orphans: [], unresolved: [], dynamicImporters: [], ...over };
+  return { moduleFiles: [], entrypoints: [], orphans: [], unresolved: [], dynamicImporters: [], resolvedEdges: [], health: { status: "complete", diagnostics: [] }, ...over };
 }
 
 function report(over: Partial<RepoReport> = {}): RepoReport {
   return {
-    version: 1,
+    version: 2,
     tool: "repo-doctor",
+    toolVersion: "0.2.0",
     createdAt: "2026-01-01T00:00:00.000Z",
     cwd: "/repo",
-    scanOptions: { ignore: [], entries: [] },
+    source: { repository: { id: "repo", kind: "git-history", root: "/repo", head: "abc", rootCommits: ["root"] }, inventoryDigest: "inventory", indexDigest: "index", trackedWorktreeClean: true },
+    scanOptions: { ignore: [], entries: [], largeCount: 20, minDupBytes: 1 },
+    scanOptionsDigest: "options",
+    health: { inventory: "complete", graph: "complete", dependencies: "complete", workspace: "complete", lockfile: "complete" },
+    diagnostics: [],
+    projects: [{ rootDir: ".", kind: "standalone", manager: { status: "resolved", name: "pnpm", version: "11", source: "packageManager", lockfilePath: "pnpm-lock.yaml", conflicts: [] }, workspacePatterns: [], packageDirs: ["."], packageNames: ["root"], workspaceSkew: [], lockfile: { path: "pnpm-lock.yaml", dialect: "pnpm-v9", parseStatus: "parsed", diagnostics: [] }, diagnostics: [] }],
     packageManager: "pnpm",
     lockfileKind: "pnpm-lock.yaml",
     totals: { trackedFiles: 0, trackedBytes: 0, moduleFiles: 0, packages: 0, declaredDeps: 0 },
@@ -198,6 +204,7 @@ describe("plan computation", () => {
     // contradictory delete-file item on top, and its bytes count once.
     const plan = buildPlan(
       report({
+        files: [file("dist/index.js", { bytes: 73 }), file("app.js", { bytes: 73 })],
         graph: graph({
           moduleFiles: ["src/index.ts", "dist/index.js"],
           entrypoints: [entry("src/index.ts")],
@@ -290,7 +297,7 @@ describe("plan computation", () => {
       LOW,
     );
     expect(plan.items[0].confidence).toBe("medium");
-    expect(plan.items[0].evidence).toContain("repo has dynamic imports — verify none loads this file");
+    expect(plan.items[0].evidence).toContain("its package has dynamic imports — verify none loads this file");
   });
 
   it("downgrades orphans to medium when the repo has unresolved imports", () => {
@@ -503,7 +510,7 @@ describe("plan computation", () => {
     expect(byTarget.get("dev-only")?.evidence).toContain("devDependencies (^1.0.0)");
   });
 
-  it("emits a single remove-dep high for an unused dual-declared dep, never a move-dep", () => {
+  it("keeps an unused multi-field dependency manual at medium confidence", () => {
     const plan = buildPlan(
       report({
         packages: [
@@ -519,10 +526,8 @@ describe("plan computation", () => {
     expect(plan.items).toHaveLength(1);
     const item = plan.items[0];
     expect(item.action).toBe("remove-dep");
-    expect(item.confidence).toBe("high");
-    expect(item.evidence).toBe(
-      "declared in both dependencies and devDependencies with no usage evidence — remove both entries",
-    );
+    expect(item.confidence).toBe("medium");
+    expect(item.evidence).toContain("least-safe runtime declaration controls");
     expect(plan.items.some((i) => i.action === "move-dep")).toBe(false);
   });
 
@@ -541,7 +546,7 @@ describe("plan computation", () => {
     );
     expect(plan.items).toHaveLength(1);
     expect(plan.items[0].action).toBe("move-dep");
-    expect(plan.items[0].confidence).toBe("high");
+    expect(plan.items[0].confidence).toBe("medium");
     expect(plan.items[0].evidence).toContain("keep the dependencies entry");
   });
 
@@ -614,24 +619,19 @@ describe("plan computation", () => {
     expect(plan.items[0].evidence).toContain("2 distinct ranges across the workspace: . → ^17.0.0, packages/b → ^18.0.0");
   });
 
-  it("caps lockfile duplicates at 20 by version count and warns about the rest with the pm dedupe command", () => {
+  it("deduplicates lockfile drift into one project-level review item", () => {
     const lockfileDuplicates = Array.from({ length: 21 }, (_, i) => ({
       name: `dep-${String(i + 1).padStart(2, "0")}`,
       versions: ["1.0.0", "2.0.0"],
     }));
     lockfileDuplicates.push({ name: "dep-22", versions: ["1.0.0", "2.0.0", "3.0.0"] });
     const plan = buildPlan(report({ lockfileDuplicates }), LOW);
-    const targets = plan.items.filter((i) => i.action === "dedupe-lockfile").map((i) => i.target);
-    expect(targets).toHaveLength(20);
-    // dep-22 has the most versions so it makes the cut; the last two 2-version names do not.
-    expect(targets).toContain("dep-22");
-    expect(targets).not.toContain("dep-20");
-    expect(targets).not.toContain("dep-21");
-    const dep22 = plan.items.find((i) => i.target === "dep-22");
-    expect(dep22?.confidence).toBe("low");
-    expect(dep22?.reclaimBytes).toBe(0);
-    expect(dep22?.evidence).toContain("3 resolved versions in the lockfile: 1.0.0, 2.0.0, 3.0.0");
-    expect(plan.summary.warnings).toContain("2 more multi-version deps in the lockfile — run pnpm dedupe");
+    const items = plan.items.filter((i) => i.action === "dedupe-lockfile");
+    expect(items).toHaveLength(1);
+    expect(items[0].target).toBe("pnpm-lock.yaml");
+    expect(items[0].confidence).toBe("low");
+    expect(items[0].relatedTargets).toContain("dep-22");
+    expect(items[0].evidence).toContain("22 dependency names resolve to multiple versions");
   });
 
   it("consolidates overlapping package families at low confidence with the catalog hint", () => {
@@ -671,7 +671,7 @@ describe("plan computation", () => {
     expect(items[0].evidence).toContain("unreachable");
   });
 
-  it("dedupes colliding remove-dep items keeping the strongest confidence", () => {
+  it("dedupes colliding remove-dep items keeping the least-safe confidence", () => {
     // Unused dep declared in two fields (not the dual dependencies/devDependencies
     // pair): one id, strongest confidence wins.
     const plan = buildPlan(
@@ -682,12 +682,13 @@ describe("plan computation", () => {
     );
     const items = plan.items.filter((i) => i.target === "tool");
     expect(items).toHaveLength(1);
-    expect(items[0].confidence).toBe("high");
+    expect(items[0].confidence).toBe("low");
   });
 
   it("rescues items matching --keep patterns without counting them as actions", () => {
     const plan = buildPlan(
       report({
+        files: [file("src/a.ts", { bytes: 10 }), file("src/b.ts", { bytes: 20 })],
         graph: graph({
           moduleFiles: ["src/index.ts", "src/a.ts", "src/b.ts"],
           entrypoints: [entry("src/index.ts")],
@@ -716,7 +717,7 @@ describe("plan computation", () => {
     expect(plan.summary.removeDeps).toBe(0);
   });
 
-  it("filters items below --min-confidence entirely and reports the count in warnings", () => {
+  it("keeps review-only findings visible regardless of --min-confidence", () => {
     const r = report({
       graph: graph({
         moduleFiles: ["src/index.ts", "src/dead.ts"],
@@ -727,11 +728,11 @@ describe("plan computation", () => {
       unreferencedAssets: [{ path: "img/x.png", bytes: 1, reason: "unreferenced" }], // low
     });
     const medium = buildPlan(r, { keep: [], minConfidence: "medium" });
-    expect(medium.items.map((i) => i.target).sort()).toEqual(["src/dead.ts", "src/utils-old.ts"]);
-    expect(medium.summary.warnings.join(" ")).toContain("1 item below --min-confidence medium");
+    expect(medium.items.map((i) => i.target).sort()).toEqual(["img/x.png", "src/dead.ts", "src/utils-old.ts"]);
+    expect(medium.summary.warnings).toEqual([]);
     const high = buildPlan(r, { keep: [], minConfidence: "high" });
-    expect(high.items.map((i) => i.target)).toEqual(["src/dead.ts"]);
-    expect(high.summary.warnings.join(" ")).toContain("2 items below --min-confidence high");
+    expect(high.items.map((i) => i.target).sort()).toEqual(["img/x.png", "src/dead.ts", "src/utils-old.ts"]);
+    expect(high.summary.warnings).toEqual([]);
   });
 
   it("sorts items by action group order, then confidence high-to-low, then target", () => {
@@ -832,6 +833,7 @@ describe("markdown rendering", () => {
   it("renders a markdown plan with summary estimates, action sections, rescued items, and next steps", () => {
     const r = report({
       totals: { trackedFiles: 10, trackedBytes: 10_000, moduleFiles: 5, packages: 1, declaredDeps: 3 },
+      files: [file("src/index.ts"), file("src/dead.ts", { bytes: 4000 }), file(".env"), file("img/old.png", { bytes: 2000 })],
       graph: graph({
         moduleFiles: ["src/index.ts", "src/dead.ts"],
         entrypoints: [entry("src/index.ts")],
@@ -848,9 +850,9 @@ describe("markdown rendering", () => {
     expect(md).toContain("## Delete files (1)");
     expect(md).toContain("## Sensitive files — review, never auto-delete (1)");
     expect(md).toContain("## Rescued by --keep (1)");
-    expect(md).toContain("`old\\.png$`");
-    expect(md).toContain("pnpm remove <name>");
-    expect(md).toContain("verify.ts --baseline");
+    expect(md).toContain("<code>old\\.png$</code>");
+    expect(md).toContain("repo-doctor-verify.mjs");
+    expect(md).toContain("--run-gates --trust-repo");
   });
 
   it("estimates the declared-deps delta from adds minus removes; move-dep does not change the count", () => {
@@ -877,16 +879,13 @@ describe("markdown rendering", () => {
     expect(md).toContain("| Declared deps | 5 | 4 |");
   });
 
-  it("renders the SKILL.md branch name, skill-rooted verify command, and review semantics in next steps", () => {
+  it("renders explicit tool-root, exact approval, and trusted-gate semantics", () => {
     const r = report();
     const md = renderPlanMarkdown(buildPlan(r, LOW), r);
-    expect(md).toContain("git switch -c repo-doctor/cleanup");
-    expect(md).not.toContain("chore/repo-doctor");
-    expect(md).toContain("npx tsx $SKILL/scripts/verify.ts --baseline .repo-doctor/report.json");
-    expect(md).toContain("target repo root");
-    expect(md).toContain("skill's checkout");
-    expect(md).toContain("Review items are findings to discuss");
-    expect(md).toContain("never executed from the plan");
+    expect(md).toContain("REPO_DOCTOR_ROOT='<repo-doctor-root>'");
+    expect(md).toContain("--approve <item-id>");
+    expect(md).toContain("repo-doctor-verify.mjs");
+    expect(md).toContain("--run-gates --trust-repo");
   });
 
   it("renders warnings verbatim and omits action sections whose items were all rescued", () => {
@@ -900,8 +899,7 @@ describe("markdown rendering", () => {
     });
     const plan = buildPlan(r, { keep: ["^delete-file:src/dead\\.ts$"], minConfidence: "medium" });
     const md = renderPlanMarkdown(plan, r);
-    expect(md).toContain("## Warnings");
-    expect(md).toContain("1 item below --min-confidence medium");
+    expect(md).toContain("## Review files");
     expect(md).not.toContain("## Delete files");
     expect(md).toContain("## Rescued by --keep (1)");
   });

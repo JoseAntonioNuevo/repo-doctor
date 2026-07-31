@@ -1,4 +1,5 @@
 import type { CleanupPlan, PlanAction, PlanItem, RepoReport } from "./types.ts";
+import { realpathSync } from "node:fs";
 
 /** Human-format a byte count (1024-based); small values stay exact. */
 export function formatBytes(n: number): string {
@@ -22,13 +23,27 @@ const SECTIONS: { action: PlanAction; title: string }[] = [
 ];
 
 function targetCell(item: PlanItem): string {
-  return item.packageDir == null ? `\`${item.target}\`` : `\`${item.target}\` (\`${item.packageDir}\`)`;
+  return item.packageDir == null ? code(item.target) : `${code(item.target)} (${code(item.packageDir)})`;
+}
+
+export function escapeMarkdownCell(value: unknown): string {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\|/g, "&#124;")
+    .replace(/\r?\n|\r/g, "<br>")
+    .replace(/`/g, "&#96;");
+}
+
+function code(value: unknown): string {
+  return `<code>${escapeMarkdownCell(value)}</code>`;
 }
 
 /** Human-readable companion to plan.json, safe to paste into a PR description. */
 export function renderPlanMarkdown(plan: CleanupPlan, report: RepoReport, maxRows = 400): string {
   const s = plan.summary;
-  const actionable = plan.items.filter((i) => !i.rescued);
+  const actionable = plan.items.filter((i) => !i.rescued && (i.disposition === "proposed" || i.disposition === "manual"));
   const rescued = plan.items.filter((i) => i.rescued);
   const filesRemoved = (s.byAction["delete-file"] ?? 0) + (s.byAction["untrack-and-gitignore"] ?? 0);
   // move-dep changes a dep's field, not the declared-name count — only adds and removes shift it.
@@ -38,7 +53,7 @@ export function renderPlanMarkdown(plan: CleanupPlan, report: RepoReport, maxRow
   const lines: string[] = [];
   lines.push("# Repo cleanup plan");
   lines.push("");
-  lines.push(`Generated ${plan.createdAt} from a scan of \`${report.cwd}\` by repo-doctor.`);
+  lines.push(`Generated ${escapeMarkdownCell(plan.createdAt)} from a scan of ${code(report.cwd)} by repo-doctor ${escapeMarkdownCell(plan.toolVersion)}.`);
   lines.push("");
   lines.push("## Summary");
   lines.push("");
@@ -58,11 +73,27 @@ export function renderPlanMarkdown(plan: CleanupPlan, report: RepoReport, maxRow
   if (s.warnings.length > 0) {
     lines.push("## Warnings");
     lines.push("");
-    for (const w of s.warnings) lines.push(`- ⚠️ ${w}`);
+    for (const w of s.warnings) lines.push(`- ⚠️ ${escapeMarkdownCell(w)}`);
+    lines.push("");
+  }
+  if (plan.diagnostics.length > 0) {
+    lines.push("## Analysis diagnostics");
+    lines.push("");
+    lines.push("| Code | Severity | Source | Scope | Message |");
+    lines.push("|---|---|---|---|---|");
+    for (const diagnostic of plan.diagnostics.slice(0, maxRows)) {
+      const scope = diagnostic.scope.path.length > 0
+        ? `${diagnostic.scope.kind}:${diagnostic.scope.path}`
+        : diagnostic.scope.kind;
+      lines.push(
+        `| ${code(diagnostic.code)} | ${escapeMarkdownCell(diagnostic.severity)} | ${escapeMarkdownCell(diagnostic.source)} | ${escapeMarkdownCell(scope)} | ${escapeMarkdownCell(diagnostic.message)} |`,
+      );
+    }
+    if (plan.diagnostics.length > maxRows) lines.push(`| … +${plan.diagnostics.length - maxRows} more | | | | |`);
     lines.push("");
   }
   for (const { action, title } of SECTIONS) {
-    const rows = actionable.filter((i) => i.action === action);
+    const rows = plan.items.filter((i) => !i.rescued && i.action === action);
     if (rows.length === 0) continue;
     lines.push(`## ${title} (${rows.length})`);
     lines.push("");
@@ -71,16 +102,16 @@ export function renderPlanMarkdown(plan: CleanupPlan, report: RepoReport, maxRow
       lines.push("> untrack and gitignore them by hand, never delete them automatically.");
       lines.push("");
     }
-    lines.push("| Target | Confidence | Evidence | Bytes |");
-    lines.push("|---|---|---|---:|");
+    lines.push("| ID | Target | Disposition | Decision | Confidence | Evidence | Bytes |");
+    lines.push("|---|---|---|---|---|---|---:|");
     for (const item of rows.slice(0, maxRows)) {
       lines.push(
-        `| ${targetCell(item)} | ${item.confidence} | ${item.evidence} | ${
+        `| ${code(item.id)} | ${targetCell(item)} | ${item.disposition} | ${item.decision.status} | ${item.confidence} | ${escapeMarkdownCell(item.evidence)} | ${
           item.reclaimBytes > 0 ? formatBytes(item.reclaimBytes) : "—"
         } |`,
       );
     }
-    if (rows.length > maxRows) lines.push(`| … +${rows.length - maxRows} more | | | |`);
+    if (rows.length > maxRows) lines.push(`| … +${rows.length - maxRows} more | | | | | | |`);
     lines.push("");
   }
   if (rescued.length > 0) {
@@ -89,23 +120,36 @@ export function renderPlanMarkdown(plan: CleanupPlan, report: RepoReport, maxRow
     lines.push("| Target | Action | Pattern | Evidence |");
     lines.push("|---|---|---|---|");
     for (const item of rescued.slice(0, maxRows)) {
-      lines.push(`| ${targetCell(item)} | ${item.action} | \`${item.keepPattern ?? ""}\` | ${item.evidence} |`);
+      lines.push(`| ${targetCell(item)} | ${escapeMarkdownCell(item.action)} | ${code(item.keepPattern ?? "")} | ${escapeMarkdownCell(item.evidence)} |`);
     }
     if (rescued.length > maxRows) lines.push(`| … +${rescued.length - maxRows} more | | | |`);
     lines.push("");
   }
-  const pm = report.packageManager ?? "npm";
+  const pm = report.packageManager ?? "<resolved-package-manager>";
   lines.push("## Next steps");
   lines.push("");
-  lines.push("1. Work on a fresh branch: `git switch -c repo-doctor/cleanup`.");
-  lines.push("2. Delete files with `git rm <path>` (never plain `rm`) so every removal is staged and reviewable.");
-  lines.push("3. Untrack junk with `git rm --cached <path>` and add the path to `.gitignore`.");
-  lines.push(`4. Remove dependencies inside each package dir: \`${pm} remove <name>\`.`);
-  lines.push("5. Review items are findings to discuss — they are never executed from the plan.");
-  lines.push(
-    "6. Re-verify from the target repo root: `npx tsx $SKILL/scripts/verify.ts --baseline .repo-doctor/report.json` — " +
-      "gates must pass before merging. (`$SKILL` is this skill's checkout directory.)",
-  );
+  const skillRoot = resolveSkillRoot();
+  lines.push(`1. Set the installed tool root: \`REPO_DOCTOR_ROOT=${shellQuote(skillRoot)}\`.`);
+  lines.push("2. Re-run plan with exact `--approve <item-id>` flags for every concrete mutation you reviewed; draft items remain pending.");
+  lines.push("3. Delete files with `git rm <path>` and untrack junk with `git rm --cached <path>` so changes remain reviewable.");
+  lines.push(`4. Make dependency edits with the resolved project manager (${code(pm)}); never invent an external version range.`);
+  lines.push("5. Run static verification, which executes no target code:");
+  lines.push(`   \`node "$REPO_DOCTOR_ROOT/bin/repo-doctor-verify.mjs" --cwd ${shellQuote(report.cwd)}\``);
+  lines.push("6. For explicitly trusted gates, add `--run-gates --trust-repo`. Re-scan after file cleanup before applying deferred dependency findings.");
   lines.push("");
   return lines.join("\n");
+}
+
+function resolveSkillRoot(): string {
+  const executable = process.argv[1] ?? "<repo-doctor-root>/bin/repo-doctor-plan.mjs";
+  let detected = executable;
+  try { detected = realpathSync(executable); } catch { /* unit tests and copied snippets have no real executable */ }
+  const normalized = detected.replace(/\\/g, "/");
+  return /\/bin\/repo-doctor-plan\.mjs$/.test(normalized)
+    ? normalized.replace(/\/bin\/repo-doctor-plan\.mjs$/, "")
+    : "<repo-doctor-root>";
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }

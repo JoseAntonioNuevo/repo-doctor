@@ -28,6 +28,7 @@ export function isModuleFile(path: string): boolean {
 // or a call expression. In scrubbed text every quoted span is a placeholder, so
 // the specifier capture is always a whole placeholder token.
 const FROM_CLAUSE_RE = /(?<![\w$.])(?:import|export)\b[^"'`;()]*?\bfrom\s*(["'])([^"'\n]+)\1/g;
+const TYPE_FROM_CLAUSE_RE = /(?<![\w$.])(?:import|export)\s+type\b[^"'`;()]*?\bfrom\s*(["'])([^"'\n]+)\1/g;
 const SIDE_EFFECT_RE = /(?<![\w$.])import\s*(["'])([^"'\n]+)\1/g;
 const CALL_HEAD_RE = /(?<![\w$.])(?:import|require(?:\s*\.\s*resolve)?)\s*\(\s*/g;
 const QUOTED_ARG_RE = /^(["'])([^"'\n]*)\1\s*[,)]/;
@@ -189,13 +190,33 @@ function scrubSource(source: string): ScrubbedSource {
 export function extractImports(source: string): {
   specifiers: string[];
   hasDynamicNonLiteral: boolean;
+  dynamicSpecifiers: string[];
+  typeOnlySpecifiers: string[];
+  referenceSpecifiers: string[];
+  viteGlobs: string[];
 } {
   const { code, values, referencePaths } = scrubSource(source);
   const specifiers = new Set<string>(referencePaths);
+  const dynamicSpecifiers = new Set<string>();
+  const typeOnlySpecifiers = new Set<string>();
+  const viteGlobs = new Set<string>();
   let hasDynamicNonLiteral = false;
 
   const recover = (text: string): string =>
     text.replace(PLACEHOLDER_RE, (_m, n: string) => values[Number(n)] ?? "");
+
+  const firstTopLevelArgument = (text: string): string => {
+    let squareDepth = 0;
+    let braceDepth = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      if (text[index] === "[") squareDepth += 1;
+      else if (text[index] === "]") squareDepth = Math.max(0, squareDepth - 1);
+      else if (text[index] === "{") braceDepth += 1;
+      else if (text[index] === "}") braceDepth = Math.max(0, braceDepth - 1);
+      else if (text[index] === "," && squareDepth === 0 && braceDepth === 0) return text.slice(0, index).trim();
+    }
+    return text.trim();
+  };
 
   for (const re of [FROM_CLAUSE_RE, SIDE_EFFECT_RE]) {
     re.lastIndex = 0;
@@ -203,6 +224,11 @@ export function extractImports(source: string): {
       const spec = recover(m[2]);
       if (spec.length > 0) specifiers.add(spec);
     }
+  }
+  TYPE_FROM_CLAUSE_RE.lastIndex = 0;
+  for (let m = TYPE_FROM_CLAUSE_RE.exec(code); m !== null; m = TYPE_FROM_CLAUSE_RE.exec(code)) {
+    const spec = recover(m[2]);
+    if (spec.length > 0) typeOnlySpecifiers.add(spec);
   }
 
   CALL_HEAD_RE.lastIndex = 0;
@@ -213,11 +239,37 @@ export function extractImports(source: string): {
     const raw = quoted?.[2] ?? template?.[1];
     if (raw != null) {
       const spec = recover(raw);
-      if (spec.length > 0) specifiers.add(spec);
+      if (spec.length > 0) {
+        specifiers.add(spec);
+        if (m[0].trimStart().startsWith("import")) dynamicSpecifiers.add(spec);
+      }
     } else {
       hasDynamicNonLiteral = true;
     }
   }
 
-  return { specifiers: [...specifiers].sort(), hasDynamicNonLiteral };
+  // Vite's glob loader is a module edge even though it is not import(). Only
+  // literal strings or arrays of literal strings are accepted; expressions
+  // deliberately degrade graph health through hasDynamicNonLiteral.
+  const viteRe = /\bimport\s*\.\s*meta\s*\.\s*glob\s*\(([^)]*)\)/g;
+  for (let m = viteRe.exec(code); m !== null; m = viteRe.exec(code)) {
+    const arg = firstTopLevelArgument(m[1]);
+    const placeholders = [...arg.matchAll(PLACEHOLDER_RE)].map((hit) => recover(hit[0]));
+    const literalOnly =
+      /^(["'`]\x00S\d+\x00["'`]|\[\s*(?:["'`]\x00S\d+\x00["'`]\s*,?\s*)*\])$/.test(arg);
+    if (!literalOnly || placeholders.length === 0) {
+      hasDynamicNonLiteral = true;
+      continue;
+    }
+    for (const pattern of placeholders) viteGlobs.add(pattern);
+  }
+
+  return {
+    specifiers: [...specifiers].sort(),
+    hasDynamicNonLiteral,
+    dynamicSpecifiers: [...dynamicSpecifiers].sort(),
+    typeOnlySpecifiers: [...typeOnlySpecifiers].sort(),
+    referenceSpecifiers: [...new Set(referencePaths)].sort(),
+    viteGlobs: [...viteGlobs].sort(),
+  };
 }

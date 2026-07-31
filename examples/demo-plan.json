@@ -1,30 +1,146 @@
 {
-  "version": 1,
+  "version": 2,
   "tool": "repo-doctor",
-  "createdAt": "2026-07-31T18:03:49.844Z",
+  "toolVersion": "0.2.0",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "source": {
+    "reportSha256": "sha256:4cd91b293ec312a5692ff71ed7bc9500c93bd488015212a37442dc57e5eb59b0",
+    "repositoryId": "sha256:a516e6e10e48fbcaf6f49a25ef9f7453ce4995d3ca8ddf4841d97a3963da4729",
+    "baselineHead": "c5739ce854e6d808e39098928ab0fefc3053fbd3",
+    "inventoryDigest": "sha256:2bcf795df9a43cd93cecd24ae002cd3cabfb9c18a3468da3d1f9744899be2a1d",
+    "indexDigest": "sha256:3feef29cfac9ce70a9e0c33426fa7d1c81d4581d8e3c451a34f68071e07f0f1c",
+    "scanOptionsDigest": "sha256:b5db212a9cbaeecaace7d41770c82525517a7658c07df21148204e968c278b00",
+    "toolVersion": "0.2.0"
+  },
   "options": {
     "keep": [
       "plugins/"
     ],
+    "approve": [],
+    "allowDelete": [],
     "minConfidence": "low"
   },
+  "diagnostics": [
+    {
+      "code": "graph.dynamic-nonliteral",
+      "severity": "warning",
+      "source": "graph",
+      "message": "src/index.ts contains a non-literal dynamic load; dependency and orphan certainty is reduced for this file.",
+      "affects": [
+        "graph",
+        "dependencies"
+      ],
+      "scope": {
+        "kind": "file",
+        "path": "src/index.ts"
+      }
+    }
+  ],
+  "protectedFiles": [
+    {
+      "path": ".DS_Store",
+      "hash": "5134fc40e856da48bbdb9feed57b6d2254897d23a8630c5f90f24eaef60209cb",
+      "reasons": [
+        "proposed:untrack-and-gitignore:.DS_Store"
+      ]
+    },
+    {
+      "path": ".env",
+      "hash": "627e6e93a3d99ab6ff999bd1ae8ca39a54e8a78ad328277b396ae4d1ea249196",
+      "reasons": [
+        "blocked:review-sensitive:.env",
+        "sensitive"
+      ]
+    },
+    {
+      "path": "assets/old-banner.png",
+      "hash": "7bfee7b1f18cee550689122727c2cd8f38da0ad6953d2578a111af171dd21bae",
+      "reasons": [
+        "review-only:review-file:assets/old-banner.png"
+      ]
+    },
+    {
+      "path": "debug.log",
+      "hash": "b30d5979e1585506efe49520a0e7605a69139e50095ba85b64bcd94876356876",
+      "reasons": [
+        "proposed:untrack-and-gitignore:debug.log"
+      ]
+    },
+    {
+      "path": "dist/index.js",
+      "hash": "780c8ebc5adac07f57959fe45cdb76c9aa538a38e2416c27947226b0410324bd",
+      "reasons": [
+        "proposed:untrack-and-gitignore:dist/index.js"
+      ]
+    },
+    {
+      "path": "package-lock.json",
+      "hash": "db3e5cbf2e9f1b1ed6c977ef3c5f06e3a1963fc9bba78ee04f6dc5028707c16d",
+      "reasons": [
+        "review-only:dedupe-lockfile:package-lock.json"
+      ]
+    },
+    {
+      "path": "src/index-old.ts",
+      "hash": "d150743deb6a9b52509bdfa6ad2b4340c44bfb2811fbabba5265befdc451cb10",
+      "reasons": [
+        "proposed:delete-file:src/index-old.ts"
+      ]
+    },
+    {
+      "path": "src/index.ts",
+      "hash": "2082c9d8cf947c180e527c3efe33283ad3d95640670dc9587ea3c51aed4b9a5f",
+      "reasons": [
+        "entrypoint:package.json main"
+      ]
+    },
+    {
+      "path": "src/legacy/engine.ts",
+      "hash": "68f6f0f8cbb747499b38704213b7b154263cf423ad32d54d6f00d7f657c32759",
+      "reasons": [
+        "manual:delete-file:src/legacy/engine.ts"
+      ]
+    },
+    {
+      "path": "src/legacy/helpers.ts",
+      "hash": "2b1e47f070aa952ad0d7c4cf75d209279e5f49b1c4bb4c44cb3b16f168f12763",
+      "reasons": [
+        "manual:delete-file:src/legacy/helpers.ts"
+      ]
+    },
+    {
+      "path": "src/plugins/analytics.ts",
+      "hash": "b932f2b72ed8a572ebd21be4a787e19fafc6758a633bf201a2de88ae054aefff",
+      "reasons": [
+        "review-only:delete-file:src/plugins/analytics.ts"
+      ]
+    },
+    {
+      "path": "src/utils/format-copy.ts",
+      "hash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f",
+      "reasons": [
+        "proposed:delete-file:src/utils/format-copy.ts"
+      ]
+    }
+  ],
   "summary": {
     "itemsTotal": 16,
     "itemsRescued": 1,
     "deleteFiles": 4,
-    "reviewFiles": 1,
-    "removeDeps": 2,
+    "reviewFiles": 0,
+    "removeDeps": 0,
     "reclaimBytes": 625,
     "byAction": {
       "delete-file": 4,
-      "review-file": 1,
-      "remove-dep": 2,
       "move-dep": 1,
-      "add-missing-dep": 1,
-      "dedupe-lockfile": 1,
-      "untrack-and-gitignore": 3,
-      "consolidate-overlap": 1,
-      "review-sensitive": 1
+      "untrack-and-gitignore": 3
+    },
+    "byDisposition": {
+      "proposed": 5,
+      "manual": 4,
+      "review-only": 4,
+      "deferred": 0,
+      "blocked": 3
     },
     "warnings": []
   },
@@ -36,9 +152,27 @@
       "packageDir": null,
       "confidence": "high",
       "evidence": "unreachable from the only entrypoint; the filename also marks it as a backup copy",
+      "evidenceItems": [
+        "unreachable from the only entrypoint; the filename also marks it as a backup copy"
+      ],
       "reclaimBytes": 61,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "proposed",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "delete-file",
+          "path": "src/index-old.ts",
+          "beforeHash": "d150743deb6a9b52509bdfa6ad2b4340c44bfb2811fbabba5265befdc451cb10"
+        }
+      ]
     },
     {
       "id": "delete-file:src/utils/format-copy.ts",
@@ -47,9 +181,27 @@
       "packageDir": null,
       "confidence": "high",
       "evidence": "unreachable from the only entrypoint; the filename also marks it as a backup copy",
+      "evidenceItems": [
+        "unreachable from the only entrypoint; the filename also marks it as a backup copy"
+      ],
       "reclaimBytes": 189,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "proposed",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "delete-file",
+          "path": "src/utils/format-copy.ts",
+          "beforeHash": "f01b3a939e4d105868efbbb7215517e161554f046b2f5e0f9c20b90ecdff666f"
+        }
+      ]
     },
     {
       "id": "delete-file:src/legacy/engine.ts",
@@ -57,10 +209,28 @@
       "target": "src/legacy/engine.ts",
       "packageDir": null,
       "confidence": "medium",
-      "evidence": "unreachable from the only entrypoint; repo has dynamic imports — verify none loads this file",
+      "evidence": "unreachable from the only entrypoint; its package has dynamic imports — verify none loads this file",
+      "evidenceItems": [
+        "unreachable from the only entrypoint; its package has dynamic imports — verify none loads this file"
+      ],
       "reclaimBytes": 143,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "manual",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "delete-file",
+          "path": "src/legacy/engine.ts",
+          "beforeHash": "68f6f0f8cbb747499b38704213b7b154263cf423ad32d54d6f00d7f657c32759"
+        }
+      ]
     },
     {
       "id": "delete-file:src/legacy/helpers.ts",
@@ -68,10 +238,28 @@
       "target": "src/legacy/helpers.ts",
       "packageDir": null,
       "confidence": "medium",
-      "evidence": "unreachable from the only entrypoint (imported only by 1 fellow orphan); repo has dynamic imports — verify none loads this file",
+      "evidence": "unreachable from the only entrypoint (imported only by 1 fellow orphan); its package has dynamic imports — verify none loads this file",
+      "evidenceItems": [
+        "unreachable from the only entrypoint (imported only by 1 fellow orphan); its package has dynamic imports — verify none loads this file"
+      ],
       "reclaimBytes": 90,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "manual",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "delete-file",
+          "path": "src/legacy/helpers.ts",
+          "beforeHash": "2b1e47f070aa952ad0d7c4cf75d209279e5f49b1c4bb4c44cb3b16f168f12763"
+        }
+      ]
     },
     {
       "id": "delete-file:src/plugins/analytics.ts",
@@ -79,10 +267,22 @@
       "target": "src/plugins/analytics.ts",
       "packageDir": null,
       "confidence": "medium",
-      "evidence": "unreachable from the only entrypoint; repo has dynamic imports — verify none loads this file",
+      "evidence": "unreachable from the only entrypoint; its package has dynamic imports — verify none loads this file",
+      "evidenceItems": [
+        "unreachable from the only entrypoint; its package has dynamic imports — verify none loads this file"
+      ],
       "reclaimBytes": 83,
       "rescued": true,
-      "keepPattern": "plugins\\/"
+      "keepPattern": "plugins\\/",
+      "disposition": "review-only",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "kept",
+        "source": "keep-pattern",
+        "value": "plugins\\/"
+      },
+      "mutations": []
     },
     {
       "id": "review-file:assets/old-banner.png",
@@ -91,42 +291,100 @@
       "packageDir": null,
       "confidence": "low",
       "evidence": "basename \"old-banner.png\" appears in no tracked text file (38 bytes)",
+      "evidenceItems": [
+        "basename \"old-banner.png\" appears in no tracked text file (38 bytes)"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "review-only",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": []
     },
     {
       "id": "remove-dep:left-pad:.",
       "action": "remove-dep",
       "target": "left-pad",
       "packageDir": ".",
-      "confidence": "medium",
-      "evidence": "declared in dependencies (^1.3.0) with no usage evidence — runtime loading can hide usage, verify before removing",
+      "confidence": "low",
+      "evidence": "usage is uncertain because this package owns non-literal dynamic loading; destructive dependency advice is blocked",
+      "evidenceItems": [
+        "usage is uncertain because this package owns non-literal dynamic loading; destructive dependency advice is blocked"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "blocked",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "blocked",
+        "source": "planner-policy",
+        "value": "dynamic-analysis-incomplete"
+      },
+      "mutations": []
     },
     {
       "id": "remove-dep:moment:.",
       "action": "remove-dep",
       "target": "moment",
       "packageDir": ".",
-      "confidence": "medium",
-      "evidence": "declared in dependencies (^2.30.0) with no usage evidence — runtime loading can hide usage, verify before removing",
+      "confidence": "low",
+      "evidence": "usage is uncertain because this package owns non-literal dynamic loading; destructive dependency advice is blocked",
+      "evidenceItems": [
+        "usage is uncertain because this package owns non-literal dynamic loading; destructive dependency advice is blocked"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "blocked",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "blocked",
+        "source": "planner-policy",
+        "value": "dynamic-analysis-incomplete"
+      },
+      "mutations": []
     },
     {
       "id": "move-dep:lodash:.",
       "action": "move-dep",
       "target": "lodash",
       "packageDir": ".",
-      "confidence": "high",
+      "confidence": "medium",
       "evidence": "declared in both dependencies and devDependencies — imported by non-test reachable code, keep the dependencies entry",
+      "evidenceItems": [
+        "declared in both dependencies and devDependencies — imported by non-test reachable code, keep the dependencies entry"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "manual",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "move-declaration",
+          "packageDir": ".",
+          "name": "lodash",
+          "field": "devDependencies",
+          "beforeRange": "^4.17.21",
+          "toField": "dependencies",
+          "afterRange": "^4.17.21"
+        }
+      ]
     },
     {
       "id": "add-missing-dep:zod:.",
@@ -135,20 +393,46 @@
       "packageDir": ".",
       "confidence": "high",
       "evidence": "imported by 1 file (e.g. src/index.ts) but declared in no manifest",
+      "evidenceItems": [
+        "imported by 1 file (e.g. src/index.ts) but declared in no manifest"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "manual",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": []
     },
     {
-      "id": "dedupe-lockfile:semver",
+      "id": "dedupe-lockfile:package-lock.json",
       "action": "dedupe-lockfile",
-      "target": "semver",
+      "target": "package-lock.json",
       "packageDir": null,
       "confidence": "low",
-      "evidence": "2 resolved versions in the lockfile: 6.3.1, 7.6.0",
+      "evidence": "1 dependency names resolve to multiple versions; review as one project-level lockfile operation (semver)",
+      "evidenceItems": [
+        "1 dependency names resolve to multiple versions; review as one project-level lockfile operation (semver)"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "review-only",
+      "prerequisites": [],
+      "relatedTargets": [
+        "semver"
+      ],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": []
     },
     {
       "id": "untrack-and-gitignore:.DS_Store",
@@ -157,9 +441,30 @@
       "packageDir": null,
       "confidence": "high",
       "evidence": "OS or editor dropping (.DS_Store, 19 bytes) — belongs in .gitignore, not in git",
+      "evidenceItems": [
+        "OS or editor dropping (.DS_Store, 19 bytes) — belongs in .gitignore, not in git"
+      ],
       "reclaimBytes": 19,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "proposed",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "untrack-file",
+          "path": ".DS_Store",
+          "beforeHash": "5134fc40e856da48bbdb9feed57b6d2254897d23a8630c5f90f24eaef60209cb",
+          "ignorePath": ".gitignore",
+          "ignorePattern": ".DS_Store",
+          "ignoreBeforeHash": "ae034b0d579d24a34e3536286017d098731df8f7389e1e6f556b9f7677227589"
+        }
+      ]
     },
     {
       "id": "untrack-and-gitignore:debug.log",
@@ -168,9 +473,30 @@
       "packageDir": null,
       "confidence": "high",
       "evidence": "committed log file (*.log, 50 bytes) — belongs in .gitignore, not in git",
+      "evidenceItems": [
+        "committed log file (*.log, 50 bytes) — belongs in .gitignore, not in git"
+      ],
       "reclaimBytes": 50,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "proposed",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "untrack-file",
+          "path": "debug.log",
+          "beforeHash": "b30d5979e1585506efe49520a0e7605a69139e50095ba85b64bcd94876356876",
+          "ignorePath": ".gitignore",
+          "ignorePattern": "debug.log",
+          "ignoreBeforeHash": "ae034b0d579d24a34e3536286017d098731df8f7389e1e6f556b9f7677227589"
+        }
+      ]
     },
     {
       "id": "untrack-and-gitignore:dist/index.js",
@@ -179,9 +505,30 @@
       "packageDir": null,
       "confidence": "high",
       "evidence": "committed build artifact (build output directory \"dist\", 73 bytes) — belongs in .gitignore, not in git; it is also unreachable in the module graph",
+      "evidenceItems": [
+        "committed build artifact (build output directory \"dist\", 73 bytes) — belongs in .gitignore, not in git; it is also unreachable in the module graph"
+      ],
       "reclaimBytes": 73,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "proposed",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": [
+        {
+          "kind": "untrack-file",
+          "path": "dist/index.js",
+          "beforeHash": "780c8ebc5adac07f57959fe45cdb76c9aa538a38e2416c27947226b0410324bd",
+          "ignorePath": ".gitignore",
+          "ignorePattern": "dist/index.js",
+          "ignoreBeforeHash": "ae034b0d579d24a34e3536286017d098731df8f7389e1e6f556b9f7677227589"
+        }
+      ]
     },
     {
       "id": "consolidate-overlap:date libraries:.",
@@ -190,9 +537,21 @@
       "packageDir": ".",
       "confidence": "low",
       "evidence": "2 date libraries in one manifest (dayjs, moment) — pick one date library; date-fns and dayjs are the lightest — migrate call sites incrementally.",
+      "evidenceItems": [
+        "2 date libraries in one manifest (dayjs, moment) — pick one date library; date-fns and dayjs are the lightest — migrate call sites incrementally."
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "review-only",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "pending",
+        "source": null,
+        "value": null
+      },
+      "mutations": []
     },
     {
       "id": "review-sensitive:.env",
@@ -201,9 +560,21 @@
       "packageDir": null,
       "confidence": "high",
       "evidence": "may contain secrets — never auto-delete; rotate credentials, untrack, and gitignore",
+      "evidenceItems": [
+        "may contain secrets — never auto-delete; rotate credentials, untrack, and gitignore"
+      ],
       "reclaimBytes": 0,
       "rescued": false,
-      "keepPattern": null
+      "keepPattern": null,
+      "disposition": "blocked",
+      "prerequisites": [],
+      "relatedTargets": [],
+      "decision": {
+        "status": "blocked",
+        "source": "planner-policy",
+        "value": "sensitive-or-incomplete"
+      },
+      "mutations": []
     }
   ]
 }

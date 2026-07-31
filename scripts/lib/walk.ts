@@ -1,8 +1,61 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { DuplicateGroup, FileInfo } from "./types.ts";
 import { pool, run } from "./exec.ts";
+
+const execFileAsync = promisify(execFile);
+
+interface IndexEntry {
+  mode: string;
+  objectId: string;
+  path: string;
+  preferIndex: boolean;
+}
+
+async function indexEntries(cwd: string): Promise<Map<string, IndexEntry>> {
+  let stdout: Buffer;
+  try {
+    const result = await execFileAsync("git", ["ls-files", "-s", "-z", "--cached"], {
+      cwd,
+      encoding: "buffer",
+      maxBuffer: 256 * 1024 * 1024,
+    });
+    stdout = Buffer.from(result.stdout);
+  } catch {
+    return new Map();
+  }
+  const map = new Map<string, IndexEntry>();
+  for (const record of Buffer.from(stdout).toString("utf8").split("\0")) {
+    if (!record) continue;
+    const match = /^(\d+) ([0-9a-f]+) \d+\t([\s\S]+)$/.exec(record);
+    if (match) map.set(match[3], { mode: match[1], objectId: match[2], path: match[3], preferIndex: false });
+  }
+  try {
+    const status = await execFileAsync("git", ["ls-files", "-v", "-z", "--cached"], { cwd, encoding: "buffer", maxBuffer: 256 * 1024 * 1024 });
+    for (const record of Buffer.from(status.stdout).toString("utf8").split("\0")) {
+      if (record.length < 3) continue;
+      const marker = record[0];
+      const path = record.slice(2);
+      const entry = map.get(path);
+      if (entry) entry.preferIndex = marker === "S" || marker === "s";
+    }
+  } catch {
+    // Older Git versions may not support the status form; normal worktree reads remain valid.
+  }
+  return map;
+}
+
+async function readIndexBlob(cwd: string, path: string): Promise<Buffer> {
+  const { stdout } = await execFileAsync("git", ["show", `:${path}`], {
+    cwd,
+    encoding: "buffer",
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  return Buffer.from(stdout);
+}
 
 /**
  * File inventory: enumerate git-tracked files, hash their content, and derive
@@ -47,8 +100,25 @@ export async function collectFileInfo(
   paths: string[],
   concurrency = 8,
 ): Promise<FileInfo[]> {
+  const index = await indexEntries(cwd);
   const infos = await pool(paths, concurrency, async (relPath): Promise<FileInfo | null> => {
+    const trackedEntry = index.get(relPath);
+    const entry = trackedEntry ?? { mode: "100644", objectId: "worktree-only", path: relPath, preferIndex: false };
+    if (entry.mode === "160000") return null; // submodule gitlink: no file content
     try {
+      if (trackedEntry?.preferIndex) {
+        const buf = await readIndexBlob(cwd, relPath);
+        return {
+          path: relPath,
+          bytes: buf.byteLength,
+          hash: createHash("sha256").update(buf).digest("hex"),
+          objectId: entry.objectId,
+          mode: entry.mode,
+          ext: extOf(relPath),
+          symlink: entry.mode === "120000",
+          fromIndex: true,
+        };
+      }
       const abs = join(cwd, relPath);
       const stats = await lstat(abs);
       if (stats.isSymbolicLink()) {
@@ -56,7 +126,8 @@ export async function collectFileInfo(
         return {
           path: relPath,
           bytes: stats.size,
-          hash: createHash("sha1").update(target).digest("hex"),
+          hash: createHash("sha256").update(target).digest("hex"),
+          ...(trackedEntry ? { objectId: entry.objectId, mode: entry.mode } : {}),
           ext: extOf(relPath),
           symlink: true,
         };
@@ -65,12 +136,28 @@ export async function collectFileInfo(
       return {
         path: relPath,
         bytes: buf.byteLength,
-        hash: createHash("sha1").update(buf).digest("hex"),
+        hash: createHash("sha256").update(buf).digest("hex"),
+        ...(trackedEntry ? { objectId: entry.objectId, mode: entry.mode } : {}),
         ext: extOf(relPath),
         symlink: false,
       };
     } catch {
-      return null;
+      try {
+        const buf = await readIndexBlob(cwd, relPath);
+        const symlink = entry.mode === "120000";
+        return {
+          path: relPath,
+          bytes: buf.byteLength,
+          hash: createHash("sha256").update(buf).digest("hex"),
+          objectId: entry.objectId,
+          mode: entry.mode,
+          ext: extOf(relPath),
+          symlink,
+          fromIndex: true,
+        };
+      } catch {
+        return null;
+      }
     }
   });
   return infos.filter((i): i is FileInfo => i !== null).sort(byPath);

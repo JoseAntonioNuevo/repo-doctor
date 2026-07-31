@@ -1,11 +1,9 @@
-/**
- * Shared data shapes for repo-doctor.
- *
- * All artifacts are versioned JSON so any agent (or CI job) can consume them
- * without running the producing script again.
- */
+/** Shared, versioned artifact contracts for repo-doctor 0.2.0. */
 
-export type PackageManager = "pnpm" | "npm" | "yarn";
+export type PackageManager = "pnpm" | "npm" | "yarn" | "bun";
+export type ProjectKind = "workspace" | "standalone" | "unmanaged";
+export type Capability = "inventory" | "graph" | "dependencies" | "workspace" | "lockfile";
+export type HealthStatus = "complete" | "degraded" | "not-applicable";
 
 export type DepField =
   | "dependencies"
@@ -13,44 +11,110 @@ export type DepField =
   | "peerDependencies"
   | "optionalDependencies";
 
-/** One tracked file in the repository. Paths are repo-root-relative, posix separators. */
+export interface Diagnostic {
+  code: string;
+  severity: "warning" | "error";
+  source: "inventory" | "graph" | "dependencies" | "workspace" | "lockfile" | "verify";
+  message: string;
+  affects: Capability[];
+  scope: {
+    kind: "repo" | "project" | "package" | "file";
+    path: string;
+  };
+}
+
+export interface AnalysisHealth {
+  inventory: HealthStatus;
+  graph: HealthStatus;
+  dependencies: HealthStatus;
+  workspace: HealthStatus;
+  lockfile: HealthStatus;
+}
+
+export interface RepositoryIdentity {
+  id: string;
+  kind: "git-history" | "local-unborn";
+  root: string;
+  head: string | null;
+  rootCommits: string[];
+}
+
+export interface RepositorySnapshot {
+  repository: RepositoryIdentity;
+  inventoryDigest: string;
+  indexDigest: string;
+  trackedWorktreeClean: boolean;
+  gitStatus?: string[];
+}
+
+export interface ScanOptionsV2 {
+  ignore: string[];
+  entries: string[];
+  largeCount: number;
+  minDupBytes: number;
+}
+
+export interface PackageManagerResolution {
+  status: "resolved" | "none" | "ambiguous" | "unsupported";
+  name: PackageManager | null;
+  version: string | null;
+  source: "packageManager" | "single-lockfile" | null;
+  lockfilePath: string | null;
+  conflicts: string[];
+}
+
+export interface LockfileStatus {
+  path: string | null;
+  dialect: string | null;
+  parseStatus: "parsed" | "unsupported" | "invalid" | "not-applicable";
+  diagnostics: Diagnostic[];
+}
+
+export interface ProjectReport {
+  rootDir: string;
+  kind: ProjectKind;
+  manager: PackageManagerResolution;
+  workspacePatterns: string[];
+  packageDirs: string[];
+  packageNames: string[];
+  workspaceSkew: WorkspaceSkew[];
+  lockfile: LockfileStatus;
+  lockfileDuplicates?: LockfileDuplicate[];
+  diagnostics: Diagnostic[];
+}
+
+/** One tracked file in the repository. */
 export interface FileInfo {
   path: string;
   bytes: number;
-  /** sha1 hex of the file content. */
+  /** sha256 of tracked content (or the tracked symlink target). */
   hash: string;
-  /** Lowercase extension without the dot; "" when the file has none. */
+  /** Git object id and mode from the index. */
+  objectId?: string;
+  mode?: string;
   ext: string;
-  /** True for symlinks — excluded from duplicate grouping and never a deletion candidate. */
   symlink: boolean;
+  /** True when content came from the index because the worktree copy was unavailable. */
+  fromIndex?: boolean;
 }
 
-/** Two or more tracked files with byte-identical content. */
 export interface DuplicateGroup {
   hash: string;
-  /** Size of one copy. */
   bytes: number;
-  /** Sorted paths; length >= 2. */
   paths: string[];
-  /** bytes * (paths.length - 1). */
   wastedBytes: number;
 }
 
 export interface EntryPoint {
   path: string;
-  /** Why this file is a root, e.g. "package.json main", "next.js route file", "test file". */
   reason: string;
 }
 
 export interface OrphanModule {
   path: string;
   bytes: number;
-  /** Other orphans that import this file (orphan clusters die together). */
   importers: string[];
-  /** Tracked text files whose content mentions this file's repo-relative path (capped at 3) —
-   *  strong evidence the "orphan" is run or referenced outside the import graph. */
   pathReferencedBy: string[];
-  /** First line starts with "#!" — likely a manually invoked script, not dead code. */
   hasShebang: boolean;
 }
 
@@ -59,82 +123,103 @@ export interface UnresolvedImport {
   specifier: string;
 }
 
-export interface ModuleGraph {
-  /** All tracked files parsed as JS/TS modules. */
-  moduleFiles: string[];
-  entrypoints: EntryPoint[];
-  /** Module files unreachable from every entrypoint. */
-  orphans: OrphanModule[];
-  /** Internal-looking specifiers that could not be resolved to a tracked file. */
-  unresolved: UnresolvedImport[];
-  /** Files containing a non-literal import()/require() — orphan confidence drops when present. */
-  dynamicImporters: string[];
+export type ImportSource = "static" | "dynamic-literal" | "reference" | "vite-glob";
+export type ImportContext = "runtime" | "test" | "config" | "tooling" | "type-only" | "unknown";
+export type ImportTarget = "file" | "workspace-package" | "external-package" | "builtin" | "unresolved";
+
+export interface ResolvedImportEdge {
+  from: string;
+  specifier: string;
+  source: ImportSource;
+  context: ImportContext;
+  target: ImportTarget;
+  path: string | null;
+  packageName: string | null;
 }
 
-/** A non-module file (image, font, media…) whose basename appears nowhere in tracked text files. */
+export interface ModuleGraph {
+  moduleFiles: string[];
+  entrypoints: EntryPoint[];
+  orphans: OrphanModule[];
+  unresolved: UnresolvedImport[];
+  dynamicImporters: string[];
+  resolvedEdges: ResolvedImportEdge[];
+  health: { status: "complete" | "incomplete"; diagnostics: Diagnostic[] };
+}
+
 export interface AssetFinding {
   path: string;
   bytes: number;
   reason: string;
 }
 
+export interface DependencyEvidence {
+  kind: "import" | "script" | "config" | "manifest" | "implicit" | "dynamic";
+  path: string;
+  detail: string;
+  context: ImportContext;
+}
+
 export interface DepUsage {
   name: string;
   field: DepField;
   range: string;
-  /** Module files in this workspace package that import it. */
   usedBy: string[];
-  /** Non-import evidence: tracked text files mentioning the name (configs, scripts…). Capped at 5. */
   textHits: string[];
-  /** Evidence from the implicit-use catalogs (bin names, config shorthand, @types pairing); null when none. */
   implicitReason: string | null;
+  evidence?: DependencyEvidence[];
+  contexts?: ImportContext[];
 }
 
-/** Parsed package.json; dir is "." for the repo root, repo-relative otherwise. */
 export interface PackageManifest {
   dir: string;
-  /** Package name, or the dir as fallback when unnamed. */
   name: string;
   raw: Record<string, unknown>;
-  /** name -> range per dep field; empty objects when the field is absent. */
   fields: Record<DepField, Record<string, string>>;
+  projectRoot?: string;
+  projectKind?: ProjectKind;
 }
 
 export interface MissingDep {
   name: string;
   importers: string[];
-  /** Another manifest dir that declares it (hoisting evidence), or null. */
   declaredIn: string | null;
+  kind?: "external" | "workspace";
+  workspaceTargetDir?: string | null;
+  suggestedField?: DepField | null;
+  suggestedRange?: string | null;
 }
 
-/** Findings for one package.json (workspace-aware; dir is "." for the root). */
 export interface PackageReport {
   dir: string;
   name: string;
+  /** Full tracked manifest snapshot, used to authorize exact semantic edits. */
+  manifest?: Record<string, unknown>;
+  projectRoot?: string;
+  projectKind?: ProjectKind;
   deps: DepUsage[];
-  /** Dep names with no imports, no text hits, and no implicit-use rule. */
   unused: string[];
+  /** Deps whose only importers are current orphan modules. */
+  orphanOnly?: string[];
+  /** Deps whose evidence is incomplete/dynamic and cannot be safely removed. */
+  uncertain?: string[];
   missing: MissingDep[];
-  /** Declared in both dependencies and devDependencies. */
   dualDeclared: string[];
 }
 
-/** Same dep declared with different ranges across workspace manifests. dir -> range. */
 export interface WorkspaceSkew {
   name: string;
   ranges: Record<string, string>;
+  projectRoot?: string;
 }
 
 export interface LockfileDuplicate {
   name: string;
-  /** Distinct resolved versions in the lockfile, sorted. */
   versions: string[];
 }
 
 export interface OverlapFinding {
-  /** Catalog family id, e.g. "date libraries". */
   family: string;
-  /** Declared packages from the same family in one manifest. */
   packages: string[];
   packageDir: string;
   hint: string;
@@ -154,18 +239,22 @@ export interface JunkFinding {
   path: string;
   bytes: number;
   category: JunkCategory;
-  /** Human-readable name of the matching rule. */
   pattern: string;
 }
 
 export interface RepoReport {
-  version: 1;
+  version: 2;
   tool: "repo-doctor";
+  toolVersion: string;
   createdAt: string;
   cwd: string;
-  /** The --ignore / --entry inputs this scan ran with. verify.ts replays them
-   *  from the baseline so its re-scan measures with the same instrument. */
-  scanOptions: { ignore: string[]; entries: string[] };
+  source: RepositorySnapshot;
+  scanOptions: ScanOptionsV2;
+  scanOptionsDigest: string;
+  health: AnalysisHealth;
+  diagnostics: Diagnostic[];
+  projects: ProjectReport[];
+  /** Root-project compatibility summary. */
   packageManager: PackageManager | null;
   lockfileKind: string | null;
   totals: {
@@ -184,13 +273,13 @@ export interface RepoReport {
   lockfileDuplicates: LockfileDuplicate[];
   overlaps: OverlapFinding[];
   junk: JunkFinding[];
-  /** Top-N tracked files by size — report-only context, never auto-actioned. */
   largeFiles: FileInfo[];
-  /** Non-fatal scan problems. Surface these to the user verbatim. */
   warnings: string[];
 }
 
 export type Confidence = "high" | "medium" | "low";
+export type PlanDisposition = "proposed" | "manual" | "review-only" | "deferred" | "blocked";
+export type ReviewStatus = "approved" | "kept" | "pending" | "blocked";
 
 export type PlanAction =
   | "delete-file"
@@ -204,29 +293,74 @@ export type PlanAction =
   | "consolidate-overlap"
   | "review-sensitive";
 
+export type PlannedMutation =
+  | { kind: "delete-file"; path: string; beforeHash: string }
+  | {
+      kind: "untrack-file";
+      path: string;
+      beforeHash: string;
+      ignorePath: string;
+      ignorePattern: string;
+      ignoreBeforeHash: string | null;
+    }
+  | {
+      kind: "remove-declaration" | "move-declaration" | "change-range";
+      packageDir: string;
+      name: string;
+      field: DepField;
+      beforeRange: string;
+      toField?: DepField;
+      afterRange?: string;
+    }
+  | { kind: "modify-lockfile"; path: string; beforeHash: string };
+
+export interface ReviewDecision {
+  status: ReviewStatus;
+  source: "approve-id" | "keep-pattern" | "planner-policy" | "allow-delete" | null;
+  value: string | null;
+}
+
 export interface PlanItem {
-  /** Stable id: "<action>:<target>" plus ":<packageDir>" for dep actions. */
   id: string;
   action: PlanAction;
-  /** File path or dependency name. */
   target: string;
-  /** Set for dep actions, null for file actions. */
   packageDir: string | null;
   confidence: Confidence;
-  /** One-sentence justification carrying the numbers/evidence. */
+  disposition: PlanDisposition;
   evidence: string;
-  /** Bytes reclaimed if applied; 0 when unknown or not applicable. */
+  evidenceItems: string[];
   reclaimBytes: number;
-  /** True when a --keep pattern matched — kept in the plan for the audit trail, excluded from action counts. */
   rescued: boolean;
   keepPattern: string | null;
+  prerequisites: string[];
+  relatedTargets: string[];
+  decision: ReviewDecision;
+  mutations: PlannedMutation[];
+}
+
+export interface ProtectedFile {
+  path: string;
+  hash: string;
+  reasons: string[];
 }
 
 export interface CleanupPlan {
-  version: 1;
+  version: 2;
   tool: "repo-doctor";
+  toolVersion: string;
   createdAt: string;
-  options: Record<string, unknown>;
+  source: {
+    reportSha256: string;
+    repositoryId: string;
+    baselineHead: string | null;
+    inventoryDigest: string;
+    indexDigest: string;
+    scanOptionsDigest: string;
+    toolVersion: string;
+  };
+  options: { keep: string[]; approve: string[]; allowDelete: string[]; minConfidence: Confidence };
+  diagnostics: Diagnostic[];
+  protectedFiles: ProtectedFile[];
   summary: {
     itemsTotal: number;
     itemsRescued: number;
@@ -235,6 +369,7 @@ export interface CleanupPlan {
     removeDeps: number;
     reclaimBytes: number;
     byAction: Record<string, number>;
+    byDisposition: Record<PlanDisposition, number>;
     warnings: string[];
   };
   items: PlanItem[];
@@ -245,21 +380,39 @@ export interface GateResult {
   command: string;
   ok: boolean;
   ms: number;
-  /** Tail of combined output, capped. */
   output: string;
+  truncated?: boolean;
+  timedOut?: boolean;
+}
+
+export interface VerifyRegressions {
+  unauthorizedRemovals: string[];
+  unauthorizedChanges: string[];
+  protectedChanges: string[];
+  missingEntrypoints: string[];
+  missingReachable: string[];
+  newOrphans: string[];
+  newUnresolvedImports: UnresolvedImport[];
+  newMissingDeps: { packageDir: string; name: string }[];
+  unplannedManifestChanges: string[];
+  gateInducedTrackedChanges: string[];
+  healthErrors: string[];
 }
 
 export interface VerifyResult {
-  version: 1;
+  version: 2;
   tool: "repo-doctor";
+  toolVersion: string;
   createdAt: string;
+  mode: "static-only" | "full";
   ok: boolean;
+  inputs: { reportSha256: string; planSha256: string };
+  candidateSnapshot: RepositorySnapshot;
+  finalSnapshot: RepositorySnapshot;
   gates: GateResult[];
-  regressions: {
-    /** Unresolved imports present after cleanup that were not in the baseline. */
-    newUnresolvedImports: UnresolvedImport[];
-    newMissingDeps: { packageDir: string; name: string }[];
-  };
+  regressions: VerifyRegressions;
+  healthChanges: { capability: Capability; before: HealthStatus; after: HealthStatus }[];
+  authorizationFailures: string[];
   comparison: {
     filesBefore: number;
     filesAfter: number;

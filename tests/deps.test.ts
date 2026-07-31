@@ -242,16 +242,15 @@ describe("analyzeDeps", () => {
     expect(report(result, ".").unused).toEqual(["prisma"]);
   });
 
-  it("sees scripts from every manifest, not only the declaring one", () => {
+  it("does not leak script evidence from a sibling manifest", () => {
     const result = analyze({
       files: {
         "package.json": { name: "root", devDependencies: { turbo: "^2.0.0" } },
         "apps/web/package.json": { name: "web", scripts: { dev: "turbo dev" } },
       },
     });
-    expect(usage(result, ".", "turbo").implicitReason).toBe(
-      'bin "turbo" appears in package.json scripts',
-    );
+    expect(usage(result, ".", "turbo").implicitReason).toBeNull();
+    expect(report(result, ".").unused).toEqual(["turbo"]);
   });
 
   it("resolves eslint config shorthand for plain and scoped configs", () => {
@@ -300,7 +299,7 @@ describe("analyzeDeps", () => {
     };
     const withConfig = analyze({ files, text: { ".prettierrc": "{}" } });
     expect(usage(withConfig, ".", "prettier-plugin-tailwindcss").implicitReason).toBe(
-      "prettier plugin and a prettier config is present",
+      "prettier plugin and config .prettierrc are package-scoped",
     );
     const withoutConfig = analyze({ files });
     expect(report(withoutConfig, ".").unused).toEqual(["prettier-plugin-tailwindcss"]);
@@ -328,7 +327,7 @@ describe("analyzeDeps", () => {
     expect(report(result, ".").unused).toEqual(["react"]);
   });
 
-  it("treats workspace-linked deps as used", () => {
+  it("does not treat workspace-looking declarations as used without graph evidence", () => {
     const result = analyze({
       files: {
         "package.json": {
@@ -338,8 +337,9 @@ describe("analyzeDeps", () => {
       },
       workspaceNames: ["@acme/utils"],
     });
-    expect(usage(result, ".", "@acme/ui").implicitReason).toBe("workspace package");
-    expect(usage(result, ".", "@acme/utils").implicitReason).toBe("workspace package");
+    expect(usage(result, ".", "@acme/ui").implicitReason).toBeNull();
+    expect(usage(result, ".", "@acme/utils").implicitReason).toBeNull();
+    expect(report(result, ".").unused).toEqual(["@acme/ui", "@acme/utils"]);
   });
 
   it("reports imported-but-undeclared packages, hoisted ones with their source", () => {
@@ -350,9 +350,9 @@ describe("analyzeDeps", () => {
       },
       imports: { "packages/api/src/index.ts": ["lodash", "left-pad", "node:fs", "./local.ts"] },
     });
-    expect(report(result, "packages/api").missing).toEqual([
-      { name: "left-pad", importers: ["packages/api/src/index.ts"], declaredIn: null },
-      { name: "lodash", importers: ["packages/api/src/index.ts"], declaredIn: "." },
+    expect(report(result, "packages/api").missing).toMatchObject([
+      { name: "left-pad", importers: ["packages/api/src/index.ts"], declaredIn: null, kind: "external" },
+      { name: "lodash", importers: ["packages/api/src/index.ts"], declaredIn: ".", kind: "external" },
     ]);
   });
 
@@ -365,18 +365,20 @@ describe("analyzeDeps", () => {
       },
       imports: { "packages/mid/leaf/src/run.ts": ["chalk"] },
     });
-    expect(report(result, "packages/mid/leaf").missing).toEqual([
-      { name: "chalk", importers: ["packages/mid/leaf/src/run.ts"], declaredIn: "packages/mid" },
+    expect(report(result, "packages/mid/leaf").missing).toMatchObject([
+      { name: "chalk", importers: ["packages/mid/leaf/src/run.ts"], declaredIn: "packages/mid", kind: "external" },
     ]);
   });
 
-  it("does not flag workspace packages as missing", () => {
+  it("reports undeclared workspace imports as missing internal declarations", () => {
     const result = analyze({
       files: { "package.json": { name: "root" } },
       imports: { "src/app.ts": ["@acme/ui"] },
       workspaceNames: ["@acme/ui"],
     });
-    expect(report(result, ".").missing).toEqual([]);
+    expect(report(result, ".").missing).toMatchObject([
+      { name: "@acme/ui", kind: "workspace", suggestedRange: "workspace:*" },
+    ]);
   });
 
   it("reports deps declared in both dependencies and devDependencies", () => {
@@ -407,7 +409,7 @@ describe("analyzeDeps", () => {
       },
     });
     expect(result.workspaceSkew).toEqual([
-      { name: "react", ranges: { ".": "^18.2.0", "apps/web": "^18.3.1" } },
+      { name: "react", ranges: { ".": "^18.2.0", "apps/web": "^18.3.1" }, projectRoot: "." },
     ]);
   });
 

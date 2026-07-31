@@ -1,53 +1,124 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const OUTPUT_CAP = 64 * 1024;
 
 export interface ExecResult {
   code: number | null;
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
   wallMs: number;
 }
 
-/**
- * Run a command without a shell, capture output, and hard-kill on timeout.
- * CI=true is forced so tools never enter watch mode or interactive prompts.
- */
+function appendTail(current: Buffer, chunk: Buffer): { value: Buffer; truncated: boolean } {
+  const joined = Buffer.concat([current, chunk]);
+  if (joined.byteLength <= OUTPUT_CAP) return { value: joined, truncated: false };
+  return { value: joined.subarray(joined.byteLength - OUTPUT_CAP), truncated: true };
+}
+
+function minimalEnvironment(passEnv: string[], inherited: boolean, extra: Record<string, string>): { env: NodeJS.ProcessEnv; home: string | null } {
+  if (inherited) return { env: { ...process.env, CI: "true", ...extra }, home: null };
+  const home = mkdtempSync(join(tmpdir(), "repo-doctor-home-"));
+  const names = process.platform === "win32"
+    ? ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP"]
+    : ["PATH", "LANG", "LC_ALL", "TMPDIR"];
+  const env: NodeJS.ProcessEnv = { CI: "true", HOME: home, USERPROFILE: home };
+  for (const name of [...names, ...passEnv]) if (process.env[name] !== undefined) env[name] = process.env[name];
+  Object.assign(env, extra);
+  return { env, home };
+}
+
+/** Run without a shell, capture bounded tails, and kill the complete process tree on timeout. */
 export function run(
   cmd: string,
   args: string[],
-  opts: { cwd: string; timeoutMs: number; env?: Record<string, string> },
+  opts: {
+    cwd: string;
+    timeoutMs: number;
+    env?: Record<string, string>;
+    environment?: "inherit" | "minimal";
+    passEnv?: string[];
+    inheritEnv?: boolean;
+  },
 ): Promise<ExecResult> {
-  const bin =
-    process.platform === "win32" && ["npx", "npm", "pnpm", "yarn"].includes(cmd) ? `${cmd}.cmd` : cmd;
+  if (!Number.isSafeInteger(opts.timeoutMs) || opts.timeoutMs <= 0) {
+    return Promise.reject(new Error("timeoutMs must be a positive safe integer"));
+  }
+  const bin = process.platform === "win32" && ["npx", "npm", "pnpm", "yarn", "bun"].includes(cmd) ? `${cmd}.cmd` : cmd;
+  const environment = opts.environment === "minimal"
+    ? minimalEnvironment(opts.passEnv ?? [], opts.inheritEnv ?? false, opts.env ?? {})
+    : { env: { ...process.env, CI: "true", ...opts.env }, home: null };
   return new Promise((resolve) => {
     const started = Date.now();
     const child = spawn(bin, args, {
       cwd: opts.cwd,
-      env: { ...process.env, CI: "true", ...opts.env },
+      env: environment.env,
+      detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
-    let stdout = "";
-    let stderr = "";
+    let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let timedOut = false;
-    child.stdout?.on("data", (d) => (stdout += d));
-    child.stderr?.on("data", (d) => (stderr += d));
+    let settled = false;
+    let escalation: NodeJS.Timeout | null = null;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (escalation) clearTimeout(escalation);
+      if (environment.home) rmSync(environment.home, { recursive: true, force: true });
+      resolve({
+        code,
+        timedOut,
+        stdout: stdout.toString("utf8"),
+        stderr: stderr.toString("utf8"),
+        stdoutTruncated,
+        stderrTruncated,
+        wallMs: Date.now() - started,
+      });
+    };
+    child.stdout?.on("data", (data: Buffer) => {
+      const next = appendTail(stdout, Buffer.from(data));
+      stdout = next.value;
+      stdoutTruncated ||= next.truncated;
+    });
+    child.stderr?.on("data", (data: Buffer) => {
+      const next = appendTail(stderr, Buffer.from(data));
+      stderr = next.value;
+      stderrTruncated ||= next.truncated;
+    });
+    const killTree = (force: boolean): void => {
+      if (child.pid === undefined) return;
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/PID", String(child.pid), "/T", ...(force ? ["/F"] : [])], { stdio: "ignore", windowsHide: true });
+      } else {
+        try { process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM"); } catch { /* already exited */ }
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+      killTree(false);
+      escalation = setTimeout(() => killTree(true), 5000);
+      escalation.unref();
     }, opts.timeoutMs);
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ code: null, timedOut, stdout, stderr: `${stderr}\n${err.message}`, wallMs: Date.now() - started });
+    child.once("error", (error) => {
+      const next = appendTail(stderr, Buffer.from(`\n${error.message}`));
+      stderr = next.value;
+      stderrTruncated ||= next.truncated;
+      finish(null);
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, timedOut, stdout, stderr, wallMs: Date.now() - started });
-    });
+    child.once("close", finish);
   });
 }
 
-/** Simple bounded-concurrency promise pool that preserves input order. */
 export async function pool<T, R>(
   items: T[],
   concurrency: number,
@@ -57,8 +128,8 @@ export async function pool<T, R>(
   let next = 0;
   const lanes = Array.from({ length: Math.max(1, concurrency) }, async () => {
     while (next < items.length) {
-      const i = next++;
-      results[i] = await worker(items[i], i);
+      const index = next++;
+      results[index] = await worker(items[index], index);
     }
   });
   await Promise.all(lanes);

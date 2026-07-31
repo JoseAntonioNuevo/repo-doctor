@@ -9,8 +9,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [20, 22]
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -19,13 +20,45 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Committed bundles are current
+        run: git diff --exit-code -- bin/
       - run: pnpm typecheck
       - run: pnpm test
-      - name: Demo pipeline smoke test
+      - name: Compiled demo pipeline
+        if: matrix.node-version == 22
         run: |
-          # make-demo builds its fixture repo in a temp dir and prints the path on stdout.
-          FIXTURE="$(npx tsx examples/make-demo.ts)"
-          npx tsx scripts/scan.ts --cwd "$FIXTURE" --out /tmp/demo-report.json
-          npx tsx scripts/plan.ts --report /tmp/demo-report.json \
-            --out-plan /tmp/demo-plan.json --out-md /tmp/demo-plan.md
-          node -e 'const p=require("/tmp/demo-plan.json"); if(!p.items.some(i=>i.action==="untrack-and-gitignore"&&i.target.startsWith("dist/"))){console.error("planted dist/ build artifact missing from demo plan");process.exit(1)}'
+          FIXTURE="$(pnpm exec tsx examples/make-demo.ts)"
+          node bin/repo-doctor-scan.mjs --cwd "$FIXTURE"
+          node bin/repo-doctor-plan.mjs --cwd "$FIXTURE"
+          node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(p.version!==2||!p.items.some(i=>i.action==="untrack-and-gitignore"&&i.target.startsWith("dist/")))process.exit(1)' "$FIXTURE/.repo-doctor/plan.json"
+
+  compiled-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            pattern: "\\[(01|02|07|19|21|22|23|24)\\]"
+          - os: macos-latest
+            pattern: "\\[(01|07|19|21|24)\\]"
+          - os: windows-latest
+            pattern: "\\[(07|21|22|23)\\]"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - run: node bin/repo-doctor-scan.mjs --help
+      - run: node bin/repo-doctor-plan.mjs --help
+      - run: node bin/repo-doctor-verify.mjs --help
+      - name: Cross-platform safety smoke tests
+        run: pnpm exec vitest run tests/issues-01-26.test.ts --testNamePattern "${{ matrix.pattern }}"
+      - name: Validate skill metadata
+        shell: bash
+        run: |
+          grep -q '^name: repo-doctor$' SKILL.md
+          grep -q '^compatibility: Requires Node.js 22.13+' SKILL.md

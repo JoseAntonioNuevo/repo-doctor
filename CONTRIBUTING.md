@@ -15,22 +15,23 @@ of contributions are especially welcome:
 git clone https://github.com/JoseAntonioNuevo/repo-doctor.git
 cd repo-doctor
 pnpm install --frozen-lockfile
+pnpm build         # regenerate committed Node 22 MJS executables
 pnpm test          # vitest self-tests
 pnpm typecheck     # tsc --noEmit
+pnpm check:generated
 ```
 
-Both must be green before opening a PR. CI runs them on Node 20 and 22, plus
-a demo-pipeline smoke test: it builds the fixture repo from
-`examples/make-demo.ts`, runs scan + plan over it, and asserts the planted
-`dist/` artifact lands in the plan.
+All checks must be green before opening a PR. CI runs the full suite on Node
+22 and 24, verifies committed bundles, and runs compiled-CLI smoke tests on
+Linux, macOS, and Windows.
 
 ## Ground rules
 
 - **Scripts stay dependency-light.** `scripts/` imports Node.js builtins only
   (`node:fs`, `node:path`, `node:child_process`, `node:util`…). No runtime
-  npm dependencies — the scripts must run in any repo via `npx tsx` (or
-  `pnpm dlx tsx`) without an install step. Dev dependencies (vitest,
-  typescript, tsx) are fine.
+  npm dependencies. The committed `bin/*.mjs` bundles must run with Node
+  22.13+ without installing repo-doctor dependencies. Dev dependencies
+  (vitest, TypeScript, tsx, esbuild) are fine.
 - **Scripts stay tool-agnostic.** Nothing in `scripts/` or the core
   `SKILL.md` workflow may require a specific agent product. Any human with a
   shell must be able to run every step.
@@ -84,12 +85,10 @@ a minimal synthetic repo.
 
 ## Adding a lockfile dialect
 
-`scripts/lib/lockfile.ts` — detection order lives in `detectLockfile`, one
-parse branch per dialect in `parseLockfileVersions`. Parsers are deliberately
-dependency-free — line-based for pnpm/yarn, plain `JSON.parse` for
-package-lock (no YAML/JSON5 libraries) — and must never throw on weird
-input: skip it. Add a small literal fixture to `tests/lockfile.test.ts` covering
-scoped names and peer-suffix noise.
+`scripts/lib/lockfile.ts` returns an explicit dialect, parse status, versions,
+and diagnostics. Parsers are dependency-free and must never turn malformed or
+unsupported input into a silent empty success. Add fixtures for scoped names,
+aliases, peer suffixes, CRLF, and malformed input.
 
 ## Releases
 

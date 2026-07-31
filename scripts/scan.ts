@@ -7,18 +7,21 @@
  * consumed by plan.ts and verify.ts. Read-only: nothing is modified.
  *
  * Standalone usage (no skill system required):
- *   npx tsx scripts/scan.ts --cwd /path/to/repo
+ *   node bin/repo-doctor-scan.mjs --cwd /path/to/repo
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { basename, join, posix, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { OVERLAP_FAMILIES } from "./lib/catalogs.ts";
+import { canonicalJson, resolveSafePath, sha256, writeArtifactAtomic } from "./lib/artifacts.ts";
 import { analyzeDeps, loadManifests } from "./lib/deps.ts";
 import { buildModuleGraph } from "./lib/graph.ts";
 import { findJunk } from "./lib/junk.ts";
-import { detectLockfile, findLockfileDuplicates, parseLockfileVersions } from "./lib/lockfile.ts";
-import { loadTsPaths, type TsPathsConfig, type WorkspacePkg } from "./lib/resolve.ts";
+import { detectLockfile, findLockfileDuplicates, parseLockfile } from "./lib/lockfile.ts";
+import { discoverProjects } from "./lib/projects.ts";
+import { repositorySnapshot } from "./lib/repository.ts";
+import { loadTsPaths, type TsConfigIssue, type TsPathsConfig, type WorkspacePkg } from "./lib/resolve.ts";
 import { collectFileInfo, findDuplicates, largestFiles, listTrackedFiles } from "./lib/walk.ts";
 import type {
   AssetFinding,
@@ -27,11 +30,14 @@ import type {
   PackageManager,
   PackageManifest,
   RepoReport,
+  Diagnostic,
 } from "./lib/types.ts";
+
+export const TOOL_VERSION = "0.2.0";
 
 const HELP = `scan — inventory a repository's files, module graph, and dependencies
 
-Usage: npx tsx scripts/scan.ts [options]
+Usage: node repo-doctor-scan.mjs [options]
 
 Options:
   --cwd <dir>            Target repo root (default: current directory)
@@ -43,6 +49,8 @@ Options:
   --large-count <n>      How many largest files to report (default: 20)
   --min-dup-bytes <n>    Ignore duplicate files smaller than this (default: 1)
   --concurrency <n>      Parallel file reads (default: 8)
+  --allow-output-outside-cwd
+                         Permit the report outside the target root
   --help                 Show this help
 
 Exit codes: 0 report written, 2 environment/usage error.`;
@@ -84,12 +92,14 @@ const WELL_KNOWN_ASSET_PREFIXES = [
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
-const LOCKFILE_BY_PM = {
-  pnpm: "pnpm-lock.yaml",
-  npm: "package-lock.json",
-  yarn: "yarn.lock",
-} as const;
-const LOCKFILE_NAMES = new Set<string>(Object.values(LOCKFILE_BY_PM));
+const LOCKFILE_NAMES = new Set([
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+]);
 
 const MODULE_EXTS = ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
 
@@ -145,7 +155,7 @@ function deriveWorkspacePkgs(manifests: PackageManifest[], fileSet: Set<string>)
       const prefix = m.dir === "." ? "" : `${m.dir}/`;
       entry = MODULE_EXTS.map((e) => `${prefix}index.${e}`).find((p) => fileSet.has(p)) ?? null;
     }
-    pkgs.push({ name: m.raw.name, dir: m.dir, entry });
+    pkgs.push({ name: m.raw.name, dir: m.dir, entry, projectRoot: m.projectRoot ?? m.dir, imports: m.raw.imports, exports: m.raw.exports });
   }
   return pkgs.sort((a, b) => (a.name < b.name ? -1 : 1));
 }
@@ -168,13 +178,28 @@ export interface ScanOptions {
  * repo, nothing to scan) — callers translate that into exit code 2.
  */
 export async function runScan(options: ScanOptions): Promise<RepoReport> {
-  const cwd = resolve(options.cwd);
+  const cwd = realpathSync(resolve(options.cwd));
   const ignore = options.ignore ?? [];
   const largeCount = options.largeCount ?? 20;
   const minDupBytes = options.minDupBytes ?? 1;
   const concurrency = options.concurrency ?? 8;
   const warnings: string[] = [];
-  const readFile = (relPath: string): string => readFileSync(join(cwd, relPath), "utf8");
+  const diagnostics: Diagnostic[] = [];
+  const indexOnly = new Set<string>();
+  try {
+    const status = execFileSync("git", ["ls-files", "-v", "-z", "--cached"], { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    for (const record of status.split("\0")) if (record[0] === "S" || record[0] === "s") indexOnly.add(record.slice(2));
+  } catch {
+    // listTrackedFiles below reports the repository error; fixture callers may inject a non-Git tree.
+  }
+  const readFile = (relPath: string): string => {
+    if (indexOnly.has(relPath)) return execFileSync("git", ["show", `:${relPath}`], { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+    try {
+      return readFileSync(join(cwd, relPath), "utf8");
+    } catch {
+      return execFileSync("git", ["show", `:${relPath}`], { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+    }
+  };
 
   // --- Tracked files --------------------------------------------------------
   const allTracked = await listTrackedFiles(cwd);
@@ -193,6 +218,14 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
     warnings.push(
       `${paths.length - files.length} tracked file(s) could not be read and were skipped`,
     );
+    diagnostics.push({
+      code: "inventory.unreadable-tracked-files",
+      severity: "error",
+      source: "inventory",
+      message: `${paths.length - files.length} tracked file(s) could not be read from the worktree or Git index.`,
+      affects: ["inventory", "graph", "dependencies"],
+      scope: { kind: "repo", path: "." },
+    });
   }
   const fileSet = new Set(files.map((f) => f.path));
 
@@ -200,15 +233,36 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
   const loaded = loadManifests(cwd, files.map((f) => f.path), readFile);
   const manifests = loaded.manifests;
   warnings.push(...loaded.warnings);
+  for (const warning of loaded.warnings) diagnostics.push({ code: "dependencies.manifest-unparseable", severity: "error", source: "dependencies", message: warning, affects: ["dependencies", "workspace"], scope: { kind: "repo", path: "." } });
+  const discovered = discoverProjects({ manifests, trackedFiles: paths, readFile });
+  diagnostics.push(...discovered.diagnostics, ...discovered.projects.flatMap((project) => project.diagnostics));
   // Per-package alias configs: each manifest dir gets its own tracked
   // tsconfig.json (apps/web/tsconfig.json owns apps/web's "@/*"), the root
   // config covers everything else.
-  const rootTsPaths = loadTsPaths(cwd);
+  const rootConfig = fileSet.has("tsconfig.json") ? "tsconfig.json" : fileSet.has("jsconfig.json") ? "jsconfig.json" : null;
+  const configDiagnostics = (issues: TsConfigIssue[], scope: string): void => {
+    for (const issue of issues) diagnostics.push({
+      code: issue.code,
+      severity: "error",
+      source: "graph",
+      message: issue.message,
+      affects: ["graph", "dependencies"],
+      scope: { kind: scope === "." ? "repo" : "package", path: scope },
+    });
+  };
+  const rootIssues: TsConfigIssue[] = [];
+  const rootTsPaths = rootConfig ? loadTsPaths(cwd, rootConfig, rootIssues) : null;
+  configDiagnostics(rootIssues, ".");
   const tsPathsByDir = new Map<string, TsPathsConfig | null>([[".", rootTsPaths]]);
   for (const m of manifests) {
     if (m.dir === ".") continue;
-    const cfg = `${m.dir}/tsconfig.json`;
-    tsPathsByDir.set(m.dir, fileSet.has(cfg) ? loadTsPaths(cwd, cfg) : rootTsPaths);
+    const tsCfg = `${m.dir}/tsconfig.json`;
+    const jsCfg = `${m.dir}/jsconfig.json`;
+    const cfg = fileSet.has(tsCfg) ? tsCfg : fileSet.has(jsCfg) ? jsCfg : null;
+    const issues: TsConfigIssue[] = [];
+    const loadedConfig = cfg ? loadTsPaths(cwd, cfg, issues) : rootTsPaths;
+    configDiagnostics(issues, m.dir);
+    tsPathsByDir.set(m.dir, loadedConfig);
   }
   const workspacePkgs = deriveWorkspacePkgs(manifests, fileSet);
 
@@ -229,6 +283,7 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
     extraEntries,
     readFile,
   });
+  diagnostics.push(...graph.health.diagnostics);
   const moduleFileSet = new Set(graph.moduleFiles);
   if (graph.moduleFiles.length > 0 && !graph.entrypoints.some((e) => moduleFileSet.has(e.path))) {
     warnings.push(
@@ -243,7 +298,7 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
     const known = TEXT_EXTS.has(f.ext);
     if (!known && f.ext !== "") continue;
     try {
-      const buf = readFileSync(join(cwd, f.path));
+      const buf = Buffer.from(readFile(f.path));
       // Extensionless files qualify only when they sniff as text (no NUL).
       if (!known && buf.subarray(0, 512).includes(0)) continue;
       const content = buf.toString("utf8");
@@ -273,6 +328,7 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
   const depsAnalysis = analyzeDeps({
     manifests,
     importsByFile,
+    resolvedEdges: graph.resolvedEdges,
     textFiles: textFiles
       .filter((t) => {
         const b = basename(t.path);
@@ -280,19 +336,31 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
       })
       .map((t) => ({ path: t.path, content: t.content })),
     workspacePkgNames: new Set(workspacePkgs.map((p) => p.name)),
+    projects: discovered.projects,
+    orphanFiles: new Set(graph.orphans.map((orphan) => orphan.path)),
+    dynamicImporters: new Set(graph.dynamicImporters),
   });
+  for (const project of discovered.projects) {
+    project.workspaceSkew = depsAnalysis.workspaceSkew.filter((item) => (item.projectRoot ?? ".") === project.rootDir);
+  }
 
   // --- Lockfile -------------------------------------------------------------
-  const lock: { kind: string; pm: PackageManager } | null = detectLockfile(cwd);
+  const lock: { kind: string; pm: PackageManager } | null = detectLockfile(cwd, paths);
   let lockfileDuplicates: LockfileDuplicate[] = [];
-  if (lock) {
-    // detectLockfile only returns a kind whose file exists — use it directly.
-    try {
-      lockfileDuplicates = findLockfileDuplicates(
-        parseLockfileVersions(lock.kind, readFileSync(join(cwd, lock.kind), "utf8")),
-      );
-    } catch {
-      warnings.push(`lockfile ${lock.kind} could not be read — multi-version analysis skipped`);
+  for (const project of discovered.projects) {
+    const path = project.manager.lockfilePath;
+    if (!path) continue;
+    const parsed = parseLockfile(posix.basename(path), readFile(path));
+    for (const item of parsed.diagnostics) {
+      item.scope = { kind: "project", path: project.rootDir };
+      diagnostics.push(item);
+      warnings.push(item.message);
+    }
+    const duplicates = findLockfileDuplicates(parsed.versions);
+    project.lockfile = { path, dialect: parsed.dialect, parseStatus: parsed.parseStatus, diagnostics: parsed.diagnostics };
+    project.lockfileDuplicates = duplicates;
+    if (project.rootDir === ".") {
+      lockfileDuplicates = duplicates;
     }
   }
 
@@ -338,16 +406,37 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
 
   // --- Report ---------------------------------------------------------------
   const declaredDeps = declaredByManifest.reduce((s, m) => s + m.names.size, 0);
+  const scanOptions = { ignore: ignore.map((re) => re.source), entries: normalizedEntries, largeCount, minDupBytes };
+  const source = repositorySnapshot(cwd, files);
+  const uniqueDiagnostics = [...new Map(diagnostics.map((item) => [canonicalJson({ code: item.code, source: item.source, scope: item.scope, affects: item.affects, message: item.message }), item])).values()];
+  diagnostics.splice(0, diagnostics.length, ...uniqueDiagnostics);
+  const lockProjects = discovered.projects.filter((project) => project.lockfile.path !== null);
+  const health = {
+    inventory: diagnostics.some((item) => item.affects.includes("inventory")) ? "degraded" as const : "complete" as const,
+    graph: graph.moduleFiles.length === 0 ? "not-applicable" as const : diagnostics.some((item) => item.affects.includes("graph")) ? "degraded" as const : "complete" as const,
+    dependencies: manifests.length === 0 ? "not-applicable" as const : diagnostics.some((item) => item.affects.includes("dependencies")) ? "degraded" as const : "complete" as const,
+    workspace: manifests.length === 0 ? "not-applicable" as const : diagnostics.some((item) => item.affects.includes("workspace")) ? "degraded" as const : "complete" as const,
+    lockfile: lockProjects.length === 0
+      ? "not-applicable" as const
+      : lockProjects.every((project) => project.lockfile.parseStatus === "parsed")
+        ? "complete" as const
+        : "degraded" as const,
+  };
+  const rootProject = discovered.projects.find((project) => project.rootDir === ".");
   return {
-    version: 1,
+    version: 2,
     tool: "repo-doctor",
+    toolVersion: TOOL_VERSION,
     createdAt: new Date().toISOString(),
     cwd,
-    // Raw regex sources + normalized entries so verify.ts can replay this
-    // scan with the exact same instrument.
-    scanOptions: { ignore: ignore.map((re) => re.source), entries: normalizedEntries },
-    packageManager: lock?.pm ?? null,
-    lockfileKind: lock?.kind ?? null,
+    source,
+    scanOptions,
+    scanOptionsDigest: sha256(canonicalJson(scanOptions)),
+    health,
+    diagnostics,
+    projects: discovered.projects,
+    packageManager: rootProject?.manager.status === "resolved" ? rootProject.manager.name : null,
+    lockfileKind: rootProject?.lockfile.path ?? lock?.kind ?? null,
     totals: {
       trackedFiles: files.length,
       trackedBytes: files.reduce((s, f) => s + f.bytes, 0),
@@ -369,7 +458,7 @@ export async function runScan(options: ScanOptions): Promise<RepoReport> {
   };
 }
 
-async function main(): Promise<void> {
+export async function scanMain(): Promise<void> {
   const { values } = parseArgs({
     options: {
       cwd: { type: "string", default: "." },
@@ -379,6 +468,7 @@ async function main(): Promise<void> {
       "large-count": { type: "string", default: "20" },
       "min-dup-bytes": { type: "string", default: "1" },
       concurrency: { type: "string", default: "8" },
+      "allow-output-outside-cwd": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
   });
@@ -386,8 +476,15 @@ async function main(): Promise<void> {
     console.log(HELP);
     return;
   }
-  const cwd = resolve(values.cwd!);
-  if (!existsSync(cwd)) fail(`--cwd does not exist: ${cwd}`);
+  const requestedCwd = resolve(values.cwd!);
+  if (!existsSync(requestedCwd)) fail(`--cwd does not exist: ${requestedCwd}`);
+  const cwd = realpathSync(requestedCwd);
+  let outPath: string;
+  try {
+    outPath = resolveSafePath(values.out!, { cwd, allowOutside: values["allow-output-outside-cwd"]!, rejectTracked: true });
+  } catch (error) {
+    return fail((error as Error).message);
+  }
   const ignore = (values.ignore ?? []).map((p) => {
     try {
       return new RegExp(p);
@@ -398,9 +495,9 @@ async function main(): Promise<void> {
   const largeCount = Number(values["large-count"]);
   const minDupBytes = Number(values["min-dup-bytes"]);
   const concurrency = Number(values.concurrency);
-  if (!(largeCount >= 0)) fail("--large-count must be a non-negative number");
-  if (!(minDupBytes >= 0)) fail("--min-dup-bytes must be a non-negative number");
-  if (!(concurrency >= 1)) fail("--concurrency must be a positive number");
+  if (!Number.isSafeInteger(largeCount) || largeCount < 0) fail("--large-count must be a non-negative safe integer");
+  if (!Number.isSafeInteger(minDupBytes) || minDupBytes < 0) fail("--min-dup-bytes must be a non-negative safe integer");
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) fail("--concurrency must be a positive safe integer");
 
   let report: RepoReport;
   try {
@@ -415,9 +512,11 @@ async function main(): Promise<void> {
   } catch (err) {
     return fail((err as Error).message);
   }
-  const outFile = resolve(cwd, values.out!);
-  mkdirSync(resolve(outFile, ".."), { recursive: true });
-  writeFileSync(outFile, JSON.stringify(report, null, 2));
+  const outFile = writeArtifactAtomic(outPath, `${JSON.stringify(report, null, 2)}\n`, {
+    cwd,
+    allowOutside: values["allow-output-outside-cwd"]!,
+    rejectTracked: true,
+  });
 
   const t = report.totals;
   const unused = report.packages.reduce((s, p) => s + p.unused.length, 0);
@@ -428,10 +527,5 @@ async function main(): Promise<void> {
       `${report.junk.length} junk file(s), ${unused} unused dep(s)`,
   );
   for (const w of report.warnings) console.error(`⚠️  ${w}`);
-  console.error("\nnext: npx tsx scripts/plan.ts --report " + relative(process.cwd(), outFile));
-}
-
-// Run only when executed directly — verify.ts imports runScan from this file.
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch((err) => fail((err as Error).stack ?? String(err)));
+  console.error(`\nnext: node \"$REPO_DOCTOR_ROOT/bin/repo-doctor-plan.mjs\" --cwd ${JSON.stringify(cwd)} --report ${JSON.stringify(relative(cwd, outFile))}`);
 }

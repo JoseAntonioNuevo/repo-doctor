@@ -21,14 +21,20 @@ import type {
   DepUsage,
   PlanAction,
   PlanItem,
+  PlanDisposition,
+  PlannedMutation,
   RepoReport,
 } from "./types.ts";
+import { canonicalJson, sha256 } from "./artifacts.ts";
 
 export interface PlanOptions {
   /** Regex sources; items whose target OR id matches are rescued — kept in the plan, excluded from action counts. */
   keep: string[];
   /** Minimum confidence for an item to appear in the plan at all. */
   minConfidence: Confidence;
+  approve?: string[];
+  allowDelete?: string[];
+  reportSha256?: string;
 }
 
 /** Output group order — mirrors the PlanAction union declaration. */
@@ -106,7 +112,7 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
     }
   });
 
-  const warnings: string[] = [];
+  const warnings: string[] = [...report.warnings];
   const byId = new Map<string, PlanItem>();
   const add = (
     action: PlanAction,
@@ -118,9 +124,43 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
   ): void => {
     const id = packageDir == null ? `${action}:${target}` : `${action}:${target}:${packageDir}`;
     const existing = byId.get(id);
-    // Collision rule: one item per (action, target, packageDir); the strongest
-    // confidence wins, and the first writer wins ties (generation order is fixed).
-    if (existing && CONFIDENCE_RANK[existing.confidence] >= CONFIDENCE_RANK[confidence]) return;
+    // Collision rule is fail-safe: the least confident declaration/context
+    // wins. A peer/optional declaration can never be upgraded by a dev entry.
+    if (existing && CONFIDENCE_RANK[existing.confidence] <= CONFIDENCE_RANK[confidence]) return;
+    const file = report.files.find((candidate) => candidate.path === target);
+    const depDeclarations = packageDir === null
+      ? []
+      : report.packages.find((pkg) => pkg.dir === packageDir)?.deps.filter((dep) => dep.name === target) ?? [];
+    const mutations: PlannedMutation[] = [];
+    if (action === "delete-file" && file) mutations.push({ kind: "delete-file", path: target, beforeHash: file.hash });
+    if (action === "untrack-and-gitignore" && file) {
+      const ignoreFile = report.files.find((candidate) => candidate.path === ".gitignore");
+      mutations.push({
+        kind: "untrack-file",
+        path: target,
+        beforeHash: file.hash,
+        ignorePath: ".gitignore",
+        ignorePattern: target,
+        ignoreBeforeHash: ignoreFile?.hash ?? null,
+      });
+    }
+    if (action === "remove-dep" && packageDir !== null) {
+      for (const dep of depDeclarations) mutations.push({ kind: "remove-declaration", packageDir, name: target, field: dep.field, beforeRange: dep.range });
+    }
+    if (action === "move-dep" && packageDir !== null && depDeclarations.length > 0) {
+      const runtime = depDeclarations.find((dep) => dep.field === "dependencies");
+      const dev = depDeclarations.find((dep) => dep.field === "devDependencies");
+      const keepRuntime = evidence.includes("non-test reachable");
+      const remove = keepRuntime ? dev : runtime;
+      const keep = keepRuntime ? runtime : dev;
+      if (remove && keep) mutations.push({ kind: "move-declaration", packageDir, name: target, field: remove.field, beforeRange: remove.range, toField: keep.field, afterRange: keep.range });
+    }
+    const baseDisposition: PlanDisposition =
+      action === "review-sensitive" ? "blocked"
+        : mutations.length === 0 ? "review-only"
+          : confidence === "high" ? "proposed"
+            : confidence === "medium" ? "manual"
+              : "review-only";
     byId.set(id, {
       id,
       action,
@@ -128,9 +168,19 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
       packageDir,
       confidence,
       evidence,
+      evidenceItems: [evidence],
       reclaimBytes,
       rescued: false,
       keepPattern: null,
+      disposition: baseDisposition,
+      prerequisites: [],
+      relatedTargets: [],
+      decision: {
+        status: baseDisposition === "blocked" ? "blocked" : "pending",
+        source: baseDisposition === "blocked" ? "planner-policy" : null,
+        value: baseDisposition === "blocked" ? "sensitive-or-incomplete" : null,
+      },
+      mutations,
     });
   };
 
@@ -226,8 +276,10 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
   const zeroEntrypoints = moduleEntrypoints === 0;
   const sortedOrphans = [...graph.orphans].sort((a, b) => (a.path < b.path ? -1 : 1));
   if (zeroEntrypoints && sortedOrphans.length > 0) warnings.push(NO_ENTRYPOINT_WARNING);
-  const hasDynamic = graph.dynamicImporters.length > 0;
-  const hasUnresolved = graph.unresolved.length > 0;
+  const owningPackageDir = (path: string): string =>
+    [...report.packages]
+      .filter((pkg) => pkg.dir === "." || path.startsWith(`${pkg.dir}/`))
+      .sort((a, b) => b.dir.length - a.dir.length)[0]?.dir ?? ".";
   for (const orphan of sortedOrphans) {
     if (claimed.has(orphan.path)) continue;
     const referencedBy = [...orphan.pathReferencedBy].sort();
@@ -259,12 +311,12 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
       // when dynamic imports would normally soften the verdict. The junk pass
       // above skips these paths, so the two signals merge into this one item.
       evidence += "; the filename also marks it as a backup copy";
-    } else if (hasDynamic) {
+    } else if (graph.dynamicImporters.some((path) => owningPackageDir(path) === owningPackageDir(orphan.path))) {
       confidence = "medium";
-      evidence += "; repo has dynamic imports — verify none loads this file";
-    } else if (hasUnresolved) {
+      evidence += "; its package has dynamic imports — verify none loads this file";
+    } else if (graph.unresolved.some((item) => owningPackageDir(item.from) === owningPackageDir(orphan.path))) {
       confidence = "medium";
-      evidence += "; repo has unresolved imports — verify none targets this file";
+      evidence += "; its package has unresolved imports — verify none targets this file";
     }
     if (zeroEntrypoints) confidence = "low";
     add("delete-file", orphan.path, null, confidence, evidence, orphan.bytes);
@@ -317,10 +369,8 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
     const unusedSet = new Set(pkg.unused);
     for (const name of [...pkg.unused].sort()) {
       if (dualSet.has(name)) {
-        // Unused AND dual-declared: one instruction — drop both entries. A
-        // move-dep here would contradict the removal.
-        add("remove-dep", name, pkg.dir, "high",
-          "declared in both dependencies and devDependencies with no usage evidence — remove both entries", 0);
+        add("remove-dep", name, pkg.dir, "medium",
+          "declared in multiple dependency fields with no usage evidence — least-safe runtime declaration controls; review exact removals", 0);
         continue;
       }
       const declared = pkg.deps
@@ -340,12 +390,33 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
         "move-dep",
         name,
         pkg.dir,
-        "high",
+        "medium",
         liveImport
           ? "declared in both dependencies and devDependencies — imported by non-test reachable code, keep the dependencies entry"
           : "declared in both dependencies and devDependencies — only test/tooling usage found, keep the devDependencies entry",
         0,
       );
+    }
+    for (const name of [...(pkg.orphanOnly ?? [])].sort()) {
+      const importers = pkg.deps.filter((dep) => dep.name === name).flatMap((dep) => dep.usedBy);
+      add("remove-dep", name, pkg.dir, "low",
+        `used only by current orphan modules (${importers.slice(0, 3).join(", ")}) — remove approved files, then re-scan before changing this declaration`, 0);
+      const item = byId.get(`remove-dep:${name}:${pkg.dir}`);
+      if (item) {
+        item.disposition = "deferred";
+        item.mutations = [];
+        item.prerequisites = importers.map((path) => `delete-file:${path}`).filter((id) => byId.has(id));
+        item.decision = { status: "blocked", source: "planner-policy", value: "fresh-scan-required" };
+      }
+    }
+    for (const name of [...(pkg.uncertain ?? [])].sort()) {
+      add("remove-dep", name, pkg.dir, "low", "usage is uncertain because this package owns non-literal dynamic loading; destructive dependency advice is blocked", 0);
+      const item = byId.get(`remove-dep:${name}:${pkg.dir}`);
+      if (item) {
+        item.disposition = "blocked";
+        item.mutations = [];
+        item.decision = { status: "blocked", source: "planner-policy", value: "dynamic-analysis-incomplete" };
+      }
     }
     for (const missing of [...pkg.missing].sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const importers = [...missing.importers].sort();
@@ -361,6 +432,16 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
         add("add-missing-dep", missing.name, pkg.dir, "low",
           `imported by ${count} — works via hoisting from ${missing.declaredIn} — declare explicitly`, 0);
       }
+      const missingItem = byId.get(`add-missing-dep:${missing.name}:${pkg.dir}`);
+      if (missingItem) {
+        missingItem.disposition = allOrphanImporters ? "deferred" : "manual";
+        missingItem.decision = allOrphanImporters
+          ? { status: "blocked", source: "planner-policy", value: "fresh-scan-required" }
+          : { status: "pending", source: null, value: null };
+        missingItem.prerequisites = allOrphanImporters
+          ? importers.map((path) => `delete-file:${path}`).filter((id) => byId.has(id))
+          : [];
+      }
     }
   }
 
@@ -369,21 +450,22 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
     const dirs = Object.keys(skew.ranges).sort();
     const pairs = dirs.map((dir) => `${dir} → ${skew.ranges[dir]}`).join(", ");
     const distinct = new Set(dirs.map((dir) => skew.ranges[dir])).size;
-    add("align-versions", skew.name, null, "medium", `${distinct} distinct ranges across the workspace: ${pairs}`, 0);
+    add("align-versions", skew.name, skew.projectRoot ?? null, "medium", `${distinct} distinct ranges across the workspace: ${pairs}`, 0);
   }
 
   // 7. Lockfile multi-version duplicates, worst offenders first.
-  const lockDups = [...report.lockfileDuplicates].sort(
-    (a, b) => b.versions.length - a.versions.length || (a.name < b.name ? -1 : 1),
-  );
-  for (const dupEntry of lockDups.slice(0, MAX_LOCKFILE_ITEMS)) {
-    const versions = [...dupEntry.versions].sort();
-    add("dedupe-lockfile", dupEntry.name, null, "low",
-      `${versions.length} resolved versions in the lockfile: ${versions.join(", ")}`, 0);
-  }
-  if (lockDups.length > MAX_LOCKFILE_ITEMS) {
-    const pm = report.packageManager ?? "npm";
-    warnings.push(`${lockDups.length - MAX_LOCKFILE_ITEMS} more multi-version deps in the lockfile — run ${pm} dedupe`);
+  const lockScopes = report.projects.some((project) => project.lockfileDuplicates !== undefined)
+    ? report.projects.map((project) => ({ target: project.lockfile.path, duplicates: project.lockfileDuplicates ?? [] }))
+    : [{ target: report.lockfileKind, duplicates: report.lockfileDuplicates }];
+  for (const scope of lockScopes) {
+    const lockDups = [...scope.duplicates].sort((a, b) => b.versions.length - a.versions.length || (a.name < b.name ? -1 : 1));
+    if (lockDups.length === 0) continue;
+    const lockTarget = scope.target ?? "lockfile";
+    const shown = lockDups.slice(0, MAX_LOCKFILE_ITEMS);
+    add("dedupe-lockfile", lockTarget, null, "low",
+      `${lockDups.length} dependency names resolve to multiple versions; review as one project-level lockfile operation (${shown.map((entry) => entry.name).join(", ")}${lockDups.length > shown.length ? ", …" : ""})`, 0);
+    const item = byId.get(`dedupe-lockfile:${lockTarget}`);
+    if (item) item.relatedTargets = lockDups.map((entry) => entry.name);
   }
 
   // 8. Overlapping same-purpose package families.
@@ -398,20 +480,79 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
       `${packages.length} ${overlap.family} in one manifest (${packages.join(", ")}) — ${overlap.hint}`, 0);
   }
 
+  // Incomplete diagnostics block only their affected scope. Repo-scoped
+  // dependency/graph failures block all related destructive items.
+  for (const item of byId.values()) {
+    const blocking = report.diagnostics.filter((diagnostic) => {
+      if (diagnostic.severity !== "error") return false;
+      if (item.packageDir !== null && !diagnostic.affects.includes("dependencies")) return false;
+      if (item.packageDir === null && !diagnostic.affects.includes("graph") && !diagnostic.affects.includes("inventory")) return false;
+      if (diagnostic.scope.kind === "repo") return true;
+      if (diagnostic.scope.kind === "file") {
+        if (diagnostic.scope.path === item.target) return true;
+        return item.packageDir !== null && (item.packageDir === "." || diagnostic.scope.path.startsWith(`${item.packageDir}/`));
+      }
+      if (item.packageDir === null) return false;
+      return item.packageDir === diagnostic.scope.path || item.packageDir.startsWith(`${diagnostic.scope.path}/`);
+    });
+    const project = item.packageDir === null ? null : report.projects.find((candidate) => candidate.packageDirs.includes(item.packageDir!));
+    if (project?.kind === "unmanaged" || project?.manager.status === "ambiguous" || blocking.length > 0) {
+      item.disposition = "blocked";
+      item.decision = { status: "blocked", source: "planner-policy", value: project?.kind === "unmanaged" ? "unmanaged-project" : blocking[0]?.code ?? "ambiguous-project" };
+      item.mutations = [];
+      item.evidenceItems.push(...blocking.map((diagnostic) => diagnostic.message));
+    }
+  }
+
+  const sensitive = new Set(report.junk.filter((item) => item.category === "sensitive").map((item) => item.path));
+  for (const path of opts.allowDelete ?? []) {
+    if (sensitive.has(path)) throw new Error(`--allow-delete cannot authorize sensitive path: ${path}`);
+    const file = report.files.find((candidate) => candidate.path === path);
+    if (!file) throw new Error(`unknown --allow-delete path: ${path}`);
+    if (!entrypointSet.has(path) && !isReachableModuleFile(path)) {
+      throw new Error(`--allow-delete is only for an entrypoint or baseline-reachable module: ${path}`);
+    }
+    const id = `delete-file:${path}`;
+    if (!byId.has(id)) add("delete-file", path, null, "high", "exact deletion explicitly reviewed with --allow-delete", file.bytes);
+    const item = byId.get(id)!;
+    item.disposition = "proposed";
+    item.decision = { status: "approved", source: "allow-delete", value: path };
+    item.mutations = [{ kind: "delete-file", path, beforeHash: file.hash }];
+  }
+
   // Rescue pass: --keep patterns match against target and id; rescued items
   // stay in the plan as an audit trail but never count as actions.
   const all = [...byId.values()];
   for (const item of all) {
-    const matched = keepRes.find((re) => re.test(item.target) || re.test(item.id));
+    const matched = keepRes.find((re) =>
+      re.test(item.target) || re.test(item.id) || item.relatedTargets.some((target) => re.test(target)),
+    );
     if (matched) {
       item.rescued = true;
       item.keepPattern = matched.source;
+      item.disposition = "review-only";
+      item.decision = { status: "kept", source: "keep-pattern", value: matched.source };
+      item.mutations = [];
     }
   }
 
-  // Confidence filter: below-threshold items disappear entirely, but the count is surfaced.
+  const approved = new Set(opts.approve ?? []);
+  for (const id of approved) {
+    const item = byId.get(id);
+    if (!item) throw new Error(`unknown --approve item id: ${id}`);
+    if (item.rescued) continue; // --keep wins
+    if (item.mutations.length === 0 || item.disposition === "blocked" || item.disposition === "deferred" || item.disposition === "review-only") {
+      throw new Error(`item cannot be approved because it has no concrete safe mutation: ${id}`);
+    }
+    item.decision = { status: "approved", source: "approve-id", value: id };
+  }
+
+  // Confidence filtering applies only to eligible recommendations. Review-only,
+  // deferred, blocked, rescued, and diagnostic-bearing items stay visible.
   const minRank = CONFIDENCE_RANK[opts.minConfidence];
-  const items = all.filter((i) => CONFIDENCE_RANK[i.confidence] >= minRank);
+  const items = all.filter((i) =>
+    i.rescued || i.decision.status === "approved" || i.disposition === "review-only" || i.disposition === "deferred" || i.disposition === "blocked" || CONFIDENCE_RANK[i.confidence] >= minRank,
+  );
   const filtered = all.length - items.length;
   if (filtered > 0) {
     warnings.push(
@@ -427,26 +568,54 @@ export function buildPlan(report: RepoReport, opts: PlanOptions): CleanupPlan {
       ((a.packageDir ?? "") < (b.packageDir ?? "") ? -1 : (a.packageDir ?? "") > (b.packageDir ?? "") ? 1 : 0),
   );
 
-  const actionable = items.filter((i) => !i.rescued);
+  const actionable = items.filter((i) => !i.rescued && (i.disposition === "proposed" || i.disposition === "manual") && i.mutations.length > 0);
   const byAction: Record<string, number> = {};
   for (const action of ACTION_ORDER) {
     const count = actionable.filter((i) => i.action === action).length;
     if (count > 0) byAction[action] = count;
   }
 
+  const byDisposition = { proposed: 0, manual: 0, "review-only": 0, deferred: 0, blocked: 0 } satisfies Record<PlanDisposition, number>;
+  for (const item of items) byDisposition[item.disposition] += 1;
+  const approvedFileMutations = new Set(items.filter((item) => item.decision.status === "approved").flatMap((item) => item.mutations).filter((mutation) => mutation.kind === "delete-file" || mutation.kind === "untrack-file").map((mutation) => mutation.path));
+  const protectedReasons = new Map<string, Set<string>>();
+  const protect = (path: string, reason: string): void => {
+    if (approvedFileMutations.has(path)) return;
+    protectedReasons.set(path, new Set([...(protectedReasons.get(path) ?? []), reason]));
+  };
+  for (const item of items) {
+    if (item.packageDir === null && report.files.some((file) => file.path === item.target) && item.decision.status !== "approved") protect(item.target, `${item.disposition}:${item.id}`);
+  }
+  for (const entrypoint of report.graph.entrypoints) protect(entrypoint.path, `entrypoint:${entrypoint.reason}`);
+  for (const path of sensitive) protect(path, "sensitive");
+  const protectedFiles = [...protectedReasons.entries()].map(([path, reasons]) => ({ path, hash: report.files.find((file) => file.path === path)?.hash ?? "missing", reasons: [...reasons].sort() })).sort((a, b) => a.path.localeCompare(b.path));
+
   return {
-    version: 1,
+    version: 2,
     tool: "repo-doctor",
+    toolVersion: report.toolVersion,
     createdAt: new Date().toISOString(),
-    options: { keep: [...opts.keep], minConfidence: opts.minConfidence },
+    source: {
+      reportSha256: opts.reportSha256 ?? sha256(canonicalJson({ source: report.source, scanOptionsDigest: report.scanOptionsDigest, toolVersion: report.toolVersion })),
+      repositoryId: report.source.repository.id,
+      baselineHead: report.source.repository.head,
+      inventoryDigest: report.source.inventoryDigest,
+      indexDigest: report.source.indexDigest,
+      scanOptionsDigest: report.scanOptionsDigest,
+      toolVersion: report.toolVersion,
+    },
+    options: { keep: [...opts.keep], approve: [...(opts.approve ?? [])], allowDelete: [...(opts.allowDelete ?? [])], minConfidence: opts.minConfidence },
+    diagnostics: [...report.diagnostics],
+    protectedFiles,
     summary: {
       itemsTotal: items.length,
-      itemsRescued: items.length - actionable.length,
+      itemsRescued: items.filter((item) => item.rescued).length,
       deleteFiles: byAction["delete-file"] ?? 0,
       reviewFiles: byAction["review-file"] ?? 0,
       removeDeps: byAction["remove-dep"] ?? 0,
       reclaimBytes: actionable.reduce((sum, i) => sum + i.reclaimBytes, 0),
       byAction,
+      byDisposition,
       warnings,
     },
     items,

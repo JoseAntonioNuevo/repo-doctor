@@ -38,8 +38,8 @@ function fi(path: string, bytes: number, hash: string, symlink = false): FileInf
   return { path, bytes, hash, ext: dot > 0 ? base.slice(dot + 1).toLowerCase() : "", symlink };
 }
 
-function sha1(text: string): string {
-  return createHash("sha1").update(text).digest("hex");
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 afterEach(() => {
@@ -73,7 +73,7 @@ describe("collectFileInfo", () => {
       {
         path: "App.TSX",
         bytes: 5,
-        hash: sha1("hello"),
+        hash: sha256("hello"),
         ext: "tsx",
         symlink: false,
       },
@@ -115,7 +115,7 @@ describe("collectFileInfo", () => {
     expect(link).toEqual({
       path: "CLAUDE.md",
       bytes: "AGENTS.md".length,
-      hash: sha1("AGENTS.md"),
+      hash: sha256("AGENTS.md"),
       ext: "md",
       symlink: true,
     });
@@ -130,7 +130,7 @@ describe("collectFileInfo", () => {
       {
         path: "dangling.md",
         bytes: "missing.md".length,
-        hash: sha1("missing.md"),
+        hash: sha256("missing.md"),
         ext: "md",
         symlink: true,
       },

@@ -1,164 +1,121 @@
 ---
 name: repo-doctor
-description: Audit and slim a bloated repository — dead JS/TS modules, byte-identical duplicate files, committed junk (build artifacts, logs, caches, editor droppings, backup copies, secrets), unreferenced assets, and dependency bloat (unused, dual-declared, version-skewed, multi-version, overlapping packages). Use when the user wants to clean up a repo, find unused dependencies, remove dead files or dead modules, shrink a repo that is too big, or audit what is safe to delete. Evidence-driven — bundled scripts build the import graph and dependency-usage report and compute the removal plan; never delete files by gut feeling.
+description: Audit and safely slim a Git repository using a bound scan, exact review approvals, and static post-cleanup verification. Finds dead JS/TS modules, duplicate and junk files, unreferenced assets, unused or missing dependencies, workspace drift, and lockfile duplication. Use when asked to clean a repo, find dead code or dependencies, or determine what is safe to remove.
+license: MIT
+compatibility: Requires Node.js 22.13+ and Git. Target code execution is opt-in and may require its package manager or network access.
 ---
 
 # repo-doctor
 
-Slim an overgrown repository (committed build output, zombie modules, `-old`
-copies, a dependency graveyard) down to what the code actually uses —
-measured from the import graph and the manifests, not guessed.
+## Non-negotiable rules
 
-## Hard rules
+1. Run scan and plan before proposing any deletion or dependency mutation.
+2. Work from a clean tracked baseline on a non-default branch.
+3. Treat every draft mutation as pending. Apply only exact IDs regenerated
+   with `--approve`; `--keep` always wins.
+4. Never approve or delete sensitive findings. Rotate credentials, remediate,
+   then establish a new baseline.
+5. Use `git rm` or `git rm --cached`; never bulk-delete by intuition.
+6. Static verification is the default. Execute target code only when the user
+   trusts the repository and explicitly authorizes gates.
 
-1. **Evidence before opinions.** Never propose deleting a file or removing a
-   dependency before `scan.ts` and `plan.ts` have produced a plan. A file that
-   "looks dead" can be loaded dynamically, referenced from config by string,
-   or served by framework convention.
-2. **The plan is a proposal, not a verdict.** The import graph cannot see
-   computed `import()` paths, plugin registries, CMS-referenced assets, or
-   CLI-only dependencies. Every candidate gets reviewed (step 3) against
-   `references/false-positives.md` before anything is removed.
-3. **Work on a clean branch, delete via `git rm` only.** Verify the working
-   tree is clean, create a branch (e.g. `repo-doctor/cleanup`), and let git do
-   the removal — recovery must always be one `git revert` away. Never
-   `rm -rf`, never on a dirty tree or the default branch.
-4. **Sensitive files are reported, never deleted.** A committed `.env` or key
-   file means: rotate the credentials, untrack the file, gitignore it.
-   Deleting it silently hides the incident while git history keeps the bytes.
-5. **Verify or revert.** The job is not done until `verify.ts` exits 0. If it
-   fails, restore what the regression list names — or revert the branch.
+## Requirements
 
-## Requirements check (do this first)
+- Node.js `>=22.13` and Git on `PATH`.
+- Resolve this installed skill's directory to an absolute path and assign it
+  once. Do not use an undefined skill-root placeholder.
 
-- Node.js ≥ 20 and `git` on PATH; the target must be a git repository — the
-  scan analyzes tracked files only
-  (`npx tsx scripts/scan.ts --help` from this skill's directory).
-- Dead-module and dependency analysis needs a JS/TS repo with a
-  `package.json`; junk, duplicate, and unreferenced-asset findings work in
-  any git repository.
-- The working tree should be clean before starting — cleanup happens on a
-  branch, and verify re-scans the tree.
-- `verify.ts` runs the repo's own install/typecheck/build/test scripts
-  (package manager auto-detected from the lockfile). In monorepos run
-  everything from the workspace root.
-- Those gates should be green before starting: run them once BEFORE cleaning.
-  If they are already red, report it and agree scope with the user (e.g.
-  `--skip-test`, or `--gate` substitutes) before any deletion — a
-  pre-existing failure must not be blamed on the cleanup.
+```bash
+REPO_DOCTOR_ROOT="/absolute/path/to/installed/repo-doctor"
+TARGET_REPO="/absolute/path/to/target repo"
+```
 
-All commands below run from the target repo root; `$SKILL` is this skill's
-directory. Artifacts land in `.repo-doctor/` (suggest gitignoring it).
+All invocations quote both values.
 
 ## Workflow
 
-### 1. SCAN (script — always first)
+### 1. Baseline
+
+Confirm the target is a Git repository, the tracked worktree is clean, and
+you are not cleaning directly on the default branch. If trusted project tests
+are requested, record their pre-cleanup status separately.
+
+### 2. Scan
 
 ```bash
-npx tsx $SKILL/scripts/scan.ts --cwd .
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-scan.mjs" --cwd "$TARGET_REPO"
 ```
 
-Lists git-tracked files, hashes them, builds the module graph from entrypoint
-conventions (package.json fields, framework routes, configs, tests,
-scripts…), analyzes per-manifest dependency usage, parses the lockfile, and
-flags junk, duplicates, and unreferenced assets. Writes
-`.repo-doctor/report.json`.
+Inspect `diagnostics`, `health`, `projects`, and `graph.entrypoints`. If a
+framework or runtime root is missing, add it with `--entry` and re-scan. Use
+`--ignore` only at baseline time; it changes the analysis instrument.
 
-- `--ignore <regex>` drops vendored or generated trees from all analysis;
-  `--entry <path>` adds roots the conventions miss (both repeatable — do this
-  BEFORE trusting the orphan list).
-- Read the report's `warnings` and `graph.entrypoints` before going further:
-  if a framework's roots are missing, everything they load looks dead.
-
-### 2. PLAN (script)
+### 3. Draft plan
 
 ```bash
-npx tsx $SKILL/scripts/plan.ts
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-plan.mjs" --cwd "$TARGET_REPO"
 ```
 
-Maps findings to concrete actions (`delete-file`, `untrack-and-gitignore`,
-`remove-dep`, …), each with a confidence tier and a one-line evidence string.
-Writes `.repo-doctor/plan.json` and a human-readable `.repo-doctor/plan.md`.
+Read `.repo-doctor/plan.md`, `references/false-positives.md`, and
+`references/bloat-patterns.md`. Explain proposed, manual, review-only,
+deferred, blocked, and sensitive findings to the user.
 
-- Force-keep anything you already know is live:
-  `--keep 'migrations' --keep 'legacy-api'` (regex on target and item id).
-- `--min-confidence` filters the plan (default `low` = everything). Heed the
-  plan's `warnings` array and relay it to the user verbatim.
+### 4. Record review decisions
 
-### 3. REVIEW (judgment — yours)
-
-Read `references/bloat-patterns.md` and `references/false-positives.md`, then
-review the plan in `plan.md`:
-
-- Rescue false positives — dynamically imported modules, string-referenced
-  files, CLI-only deps, type-only packages, convention-served `public/`
-  files. Re-run plan with additional `--keep` patterns rather than editing
-  the plan by hand, so the audit trail records each rescue.
-- Confidence gates execution (table in `false-positives.md`): high items may
-  be executed after a sanity read; medium items need a repo-wide call-site
-  scan first; low and sensitive items are a conversation with the user, not
-  an action.
-- Classify what remains by bloat pattern so the user sees *why* each item
-  dies (the patterns file has the catalog).
-
-### 4. CLEAN (judgment — yours)
-
-On a clean tree, on a branch — then apply plan items by action:
+Regenerate the plan with repeatable exact decisions:
 
 ```bash
-git switch -c repo-doctor/cleanup
-git rm <path>                        # delete-file
-git rm --cached <path>               # untrack-and-gitignore …
-echo '<pattern>' >> .gitignore       # … plus the ignore rule
-pnpm remove <dep>                    # remove-dep (npm/yarn per lockfile)
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-plan.mjs" \
+  --cwd "$TARGET_REPO" \
+  --keep '^known-live/' \
+  --approve 'delete-file:src/obsolete.ts'
 ```
 
-`move-dep`, `add-missing-dep`, and `align-versions` are manifest edits (the
-evidence says which side or range to keep) followed by a reinstall;
-`dedupe-lockfile` is one `pnpm dedupe` / `npm dedupe` / `yarn dedupe`;
-`consolidate-overlap` is a migration — propose it, don't do it unilaterally.
-`review-file` and `review-sensitive` items are findings to discuss or convert
-into explicit decisions — never executed from the plan (hard rule 4 for
-sensitive). The `plan.md` footer lists the command templates to use.
+Use `--allow-delete <exact-path>` only for an intentional non-sensitive
+entrypoint/reachable deletion. Never edit `plan.json` by hand; its exact bytes
+and source report are part of verification.
 
-### 5. VERIFY (script — gates completion)
+### 5. Clean
+
+Apply only approved exact mutations using Git-aware commands. Review-only,
+deferred, blocked, pending, rescued, and sensitive items remain protected.
+
+If a dependency is `deferred` because only proposed orphan files use it,
+remove the approved files first, then run a fresh scan and plan. Do not remove
+the dependency from the first plan.
+
+### 6. Verify statically
 
 ```bash
-npx tsx $SKILL/scripts/verify.ts --baseline .repo-doctor/report.json
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-verify.mjs" --cwd "$TARGET_REPO"
 ```
 
-Re-scans the repo, diffs it against the baseline (new unresolved imports or
-new missing deps = regressions), then runs the repo's own install, typecheck,
-build, and test scripts as gates. Exit 0 = done; exit 1 = fix and re-run
-(restore what the regression list names); exit 2 = environment problem, stop
-and report. The re-scan replays the `--ignore`/`--entry` options recorded in
-the baseline report automatically — `--ignore`/`--entry` here only ADD to
-that set. `--gate "cmd args"` replaces the script gates with custom ones. The
-install gate deliberately allows a lockfile update (pnpm
-`--no-frozen-lockfile`, Yarn immutable off) — the cleanup edits manifests.
+Exit 0 with `STATIC VERIFY PASSED` proves the reviewed static invariants and
+executes no target code. Exit 1 names cleanup regressions. Exit 2 indicates an
+unsafe path, stale/wrong binding, legacy artifact, usage error, or missing
+trust; stop and correct the baseline rather than bypassing it.
 
-## Reporting back
+### 7. Optional trusted gates
 
-Summarize for the user: tracked files and bytes before → after, dependencies
-removed per package, junk untracked, duplicate groups collapsed, items
-rescued from the plan and why (cite the false-positive section), sensitive
-findings and how they were handled, and the final verify verdict. Include
-the path to `plan.md` for the full audit trail.
+Only with explicit authorization:
 
-## Failure modes
+```bash
+node "$REPO_DOCTOR_ROOT/bin/repo-doctor-verify.mjs" \
+  --cwd "$TARGET_REPO" --run-gates --trust-repo
+```
 
-- **Not a git repository / no tracked files** → scripts exit 2 with
-  guidance; run from the repo root or pass `--cwd`.
-- **The orphan list looks absurd** (half of `src/` "dead") → the entrypoint
-  conventions missed the framework. Check `graph.entrypoints`, add `--entry`
-  roots, re-scan. Never bulk-delete a suspicious orphan list.
-- **`graph.dynamicImporters` is non-empty** → orphan confidence drops to
-  medium by design (backup-named orphans stay high); grep each orphan's
-  basename before deleting it.
-- **Verify keeps failing** → stop looping after ~3 attempts; the regressions
-  name exact files and deps — restore those (`git revert`, or re-add the
-  dep) and present the residual failures to the user.
-- **Sensitive files found** → stop and report before any other cleanup;
-  credentials must be rotated, and git history still holds the bytes
-  (history rewriting is a human decision — see
-  `references/bloat-patterns.md`).
+Automatic installs are frozen and manager-specific. Use `--pass-env NAME`
+for individual credentials or `--inherit-env` only when explicitly accepted.
+Environment scrubbing is not a sandbox; use a VM/container for untrusted code.
+
+## Report back
+
+State separately:
+
+- baseline and final tracked files/bytes;
+- approved and applied exact IDs;
+- rescued, deferred, blocked, and sensitive findings with reasons;
+- dependencies changed per package/project;
+- static verification result;
+- trusted gate commands/results, if any;
+- paths to `plan.md`, `report.after.json`, and `verify.json`.

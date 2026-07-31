@@ -364,7 +364,7 @@ describe("runScan", () => {
       "notes.md": "docs",
     });
     const report = await runScan({ cwd: dir, ignore: [/ignored-nothing/] });
-    expect(report.scanOptions).toEqual({ ignore: ["ignored-nothing"], entries: [] });
+    expect(report.scanOptions).toEqual({ ignore: ["ignored-nothing"], entries: [], largeCount: 20, minDupBytes: 1 });
     expect(report.warnings).toContain(NO_ENTRY_WARNING);
     expect(report.graph.orphans.map((o) => o.path)).toEqual(["src/helper.ts"]);
   });
@@ -372,7 +372,7 @@ describe("runScan", () => {
   it("normalizes --entry inputs into scanOptions and drops the honesty warning", async () => {
     const dir = gitRepo({ "src/helper.ts": "export const x = 1;" });
     const report = await runScan({ cwd: dir, entries: ["./src/helper.ts"] });
-    expect(report.scanOptions).toEqual({ ignore: [], entries: ["src/helper.ts"] });
+    expect(report.scanOptions).toEqual({ ignore: [], entries: ["src/helper.ts"], largeCount: 20, minDupBytes: 1 });
     expect(report.warnings).not.toContain(NO_ENTRY_WARNING);
     expect(report.graph.orphans).toEqual([]);
   });

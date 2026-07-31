@@ -13,11 +13,19 @@ export interface TsPathsConfig {
   paths: Record<string, string[]>;
 }
 
+export interface TsConfigIssue {
+  code: "graph.tsconfig-cycle" | "graph.tsconfig-unreadable" | "graph.tsconfig-unsupported-extends" | "graph.tsconfig-unsupported-option";
+  message: string;
+}
+
 /** One workspace package; entry is repo-relative (from main/module/exports), null when unknown. */
 export interface WorkspacePkg {
   name: string;
   dir: string;
   entry: string | null;
+  projectRoot?: string;
+  imports?: unknown;
+  exports?: unknown;
 }
 
 export type Resolution =
@@ -91,33 +99,56 @@ function toRepoRel(cwd: string, absPath: string): string {
  * result is rewritten repo-relative. Any read or parse problem returns null —
  * a broken tsconfig must degrade alias resolution, not kill the scan.
  */
-export function loadTsPaths(cwd: string, tsconfigPath = "tsconfig.json"): TsPathsConfig | null {
+export function loadTsPaths(cwd: string, tsconfigPath = "tsconfig.json", issues: TsConfigIssue[] = []): TsPathsConfig | null {
   try {
     const abs = isAbsolute(tsconfigPath) ? tsconfigPath : join(cwd, tsconfigPath);
-    const raw = readJsonc(abs);
-    if (raw === null) return null;
-
-    const ownDir = dirname(abs);
-    const own = compilerOptionsOf(raw);
-    let parent: Record<string, unknown> = {};
-    let parentDir = ownDir;
-    const ext = raw["extends"];
-    if (typeof ext === "string" && (ext.startsWith("./") || ext.startsWith("../"))) {
-      let parentAbs = resolve(ownDir, ext);
-      if (!existsSync(parentAbs) && !parentAbs.endsWith(".json")) parentAbs += ".json";
-      const parentRaw = readJsonc(parentAbs);
-      if (parentRaw !== null) {
-        parent = compilerOptionsOf(parentRaw);
-        parentDir = dirname(parentAbs);
+    type Pick = { value: unknown; dir: string };
+    const load = (path: string, visiting: Set<string>): Record<string, Pick> | null => {
+      const normalizedPath = resolve(path);
+      if (visiting.has(normalizedPath)) {
+        issues.push({ code: "graph.tsconfig-cycle", message: `Configuration extends cycle includes ${toRepoRel(cwd, normalizedPath)}.` });
+        return null;
       }
-    }
-
-    const pick = (key: string): { value: unknown; dir: string } | null =>
-      own[key] !== undefined
-        ? { value: own[key], dir: ownDir }
-        : parent[key] !== undefined
-          ? { value: parent[key], dir: parentDir }
-          : null;
+      let raw: Record<string, unknown> | null;
+      try {
+        raw = readJsonc(normalizedPath);
+      } catch (error) {
+        issues.push({ code: "graph.tsconfig-unreadable", message: `${toRepoRel(cwd, normalizedPath)} could not be parsed: ${(error as Error).message}` });
+        return null;
+      }
+      if (raw === null) {
+        issues.push({ code: "graph.tsconfig-unreadable", message: `${toRepoRel(cwd, normalizedPath)} could not be read.` });
+        return null;
+      }
+      const next = new Set(visiting).add(normalizedPath);
+      const ownDir = dirname(normalizedPath);
+      const merged: Record<string, Pick> = {};
+      const extensions = Array.isArray(raw.extends) ? raw.extends : [raw.extends];
+      for (const extension of extensions) {
+        if (typeof extension !== "string") continue;
+        if (!extension.startsWith("./") && !extension.startsWith("../")) {
+          issues.push({ code: "graph.tsconfig-unsupported-extends", message: `${toRepoRel(cwd, normalizedPath)} extends non-relative config ${extension}; tracked-only resolution cannot evaluate it.` });
+          continue;
+        }
+        let parentAbs = resolve(ownDir, extension);
+        if (!existsSync(parentAbs) && !parentAbs.endsWith(".json")) parentAbs += ".json";
+        const parent = load(parentAbs, next);
+        if (parent === null) return null;
+        Object.assign(merged, parent);
+      }
+      for (const [key, value] of Object.entries(compilerOptionsOf(raw))) {
+        merged[key] = { value, dir: ownDir };
+      }
+      for (const option of ["rootDirs", "moduleSuffixes"]) {
+        if (Object.hasOwn(compilerOptionsOf(raw), option)) {
+          issues.push({ code: "graph.tsconfig-unsupported-option", message: `${toRepoRel(cwd, normalizedPath)} uses compilerOptions.${option}, which Repo Doctor does not model.` });
+        }
+      }
+      return merged;
+    };
+    const picks = load(abs, new Set());
+    if (picks === null) return null;
+    const pick = (key: string): Pick | null => picks[key] ?? null;
 
     const basePick = pick("baseUrl");
     const baseAbs =
@@ -143,7 +174,8 @@ export function loadTsPaths(cwd: string, tsconfigPath = "tsconfig.json"): TsPath
     }
 
     return { baseUrl: baseAbs === null ? null : toRepoRel(cwd, baseAbs), paths };
-  } catch {
+  } catch (error) {
+    issues.push({ code: "graph.tsconfig-unreadable", message: `${tsconfigPath} could not be resolved: ${(error as Error).message}` });
     return null;
   }
 }
@@ -193,6 +225,58 @@ function matchTsPath(
   return best === null ? null : { targets: best.targets, star: best.star };
 }
 
+function firstStringLeaf(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = firstStringLeaf(item);
+      if (hit) return hit;
+    }
+  } else if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["import", "require", "node", "default", ...Object.keys(record).sort()]) {
+      const hit = firstStringLeaf(record[key]);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+function matchPackageMap(spec: string, map: unknown): string | null {
+  if (map === null || typeof map !== "object" || Array.isArray(map)) return null;
+  const record = map as Record<string, unknown>;
+  if (Object.hasOwn(record, spec)) return firstStringLeaf(record[spec]);
+  let best: { prefix: number; target: string } | null = null;
+  for (const [pattern, value] of Object.entries(record)) {
+    const star = pattern.indexOf("*");
+    if (star === -1) continue;
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (!spec.startsWith(prefix) || !spec.endsWith(suffix)) continue;
+    const leaf = firstStringLeaf(value);
+    if (!leaf) continue;
+    const replacement = spec.slice(prefix.length, spec.length - suffix.length);
+    if (best === null || prefix.length > best.prefix) best = { prefix: prefix.length, target: leaf.replace("*", replacement) };
+  }
+  return best?.target ?? null;
+}
+
+function packageOwner(fromFile: string, packages: WorkspacePkg[]): WorkspacePkg | null {
+  return [...packages]
+    .filter((pkg) => pkg.dir === "." || fromFile.startsWith(`${pkg.dir}/`))
+    .sort((a, b) => b.dir.length - a.dir.length)[0] ?? null;
+}
+
+/** Resolve a self/workspace package only inside the importing file's project. */
+export function workspacePackageFor(fromFile: string, spec: string, packages: WorkspacePkg[]): WorkspacePkg | null {
+  const owner = packageOwner(fromFile, packages);
+  if (!owner) return packages.find((pkg) => spec === pkg.name || spec.startsWith(`${pkg.name}/`)) ?? null;
+  return packages.find((pkg) =>
+    (pkg.projectRoot ?? ".") === (owner.projectRoot ?? ".") &&
+    (spec === pkg.name || spec.startsWith(`${pkg.name}/`)),
+  ) ?? null;
+}
+
 /**
  * Resolve one specifier from one file. Order: builtin, relative, tsconfig
  * alias, workspace package, external package. Relative and alias specifiers
@@ -216,6 +300,22 @@ export function resolveSpecifier(
     return hit === null ? { kind: "unresolved" } : { kind: "internal", path: hit };
   }
 
+
+  if (spec.startsWith("/")) {
+    const hit = tryFileCandidates(normalized(spec.replace(/^\/+/, "")), fileSet);
+    return hit === null ? { kind: "unresolved" } : { kind: "internal", path: hit };
+  }
+
+  if (spec.startsWith("#")) {
+    const owner = packageOwner(fromFile, workspacePkgs);
+    const mapped = owner ? matchPackageMap(spec, owner.imports) : null;
+    if (owner && mapped) {
+      const base = normalized(posix.join(owner.dir, mapped.replace(/^\.\//, "")));
+      const hit = base.startsWith("../") ? null : tryFileCandidates(base, fileSet);
+      return hit ? { kind: "internal", path: hit } : { kind: "unresolved" };
+    }
+  }
+
   if (tsPaths !== null) {
     const match = matchTsPath(spec, tsPaths.paths);
     if (match !== null) {
@@ -227,9 +327,19 @@ export function resolveSpecifier(
       }
       return { kind: "unresolved" };
     }
+    if (tsPaths.baseUrl !== null) {
+      const base = normalized(posix.join(tsPaths.baseUrl, spec));
+      if (!base.startsWith("../")) {
+        const hit = tryFileCandidates(base, fileSet);
+        if (hit !== null) return { kind: "internal", path: hit };
+      }
+    }
   }
 
-  for (const pkg of workspacePkgs) {
+  if (spec.startsWith("#")) return { kind: "unresolved" };
+
+  const scopedPackage = workspacePackageFor(fromFile, spec, workspacePkgs);
+  for (const pkg of scopedPackage ? [scopedPackage] : []) {
     if (spec === pkg.name) {
       if (pkg.entry !== null) return { kind: "internal", path: pkg.entry };
       for (const ext of EXTS) {
@@ -239,6 +349,13 @@ export function resolveSpecifier(
       return { kind: "package", name: pkg.name };
     }
     if (spec.startsWith(`${pkg.name}/`)) {
+      const subpath = `./${spec.slice(pkg.name.length + 1)}`;
+      const exported = matchPackageMap(subpath, pkg.exports);
+      if (exported) {
+        const exportedBase = normalized(posix.join(pkg.dir, exported.replace(/^\.\//, "")));
+        const exportedHit = exportedBase.startsWith("../") ? null : tryFileCandidates(exportedBase, fileSet);
+        if (exportedHit) return { kind: "internal", path: exportedHit };
+      }
       // Subpath into a workspace package: an untracked hit (e.g. built dist/)
       // is normal, so a miss stays "package" rather than becoming noise.
       const base = normalized(posix.join(pkg.dir, spec.slice(pkg.name.length + 1)));
@@ -246,11 +363,6 @@ export function resolveSpecifier(
       return hit === null ? { kind: "package", name: pkg.name } : { kind: "internal", path: hit };
     }
   }
-
-  if (spec.startsWith("/")) return { kind: "unresolved" }; // absolute specifiers are never npm packages
-  // package.json subpath imports ("#…") are internal aliases, never npm packages;
-  // without the (unmodeled) imports map they are unresolved, not a missing dep.
-  if (spec.startsWith("#")) return { kind: "unresolved" };
 
   const segments = spec.split("/");
   if (spec.startsWith("@")) {
