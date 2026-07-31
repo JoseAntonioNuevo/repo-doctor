@@ -1,0 +1,37 @@
+{
+  "name": "repo-doctor",
+  "version": "0.1.0",
+  "description": "Agent skill + standalone scripts to audit and slim bloated repositories — dead files, duplicate files, committed junk, and unused or duplicated dependencies, with an evidence-driven removal plan and post-cleanup verification.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "author": "Jose Antonio Nuevo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JoseAntonioNuevo/repo-doctor.git"
+  },
+  "keywords": [
+    "agent-skill",
+    "claude-code",
+    "repo-cleanup",
+    "dead-code",
+    "unused-dependencies",
+    "duplicate-files",
+    "dependency-audit",
+    "monorepo"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.6.0",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

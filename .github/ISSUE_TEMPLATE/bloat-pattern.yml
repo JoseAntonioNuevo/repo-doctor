@@ -1,0 +1,53 @@
+name: New repository bloat pattern
+description: Report a repository-bloat pattern the catalog should cover
+title: "[bloat-pattern] "
+labels: ["bloat-pattern"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! The catalog lives in `references/bloat-patterns.md`. Each entry
+        needs a detection signal, an example, a remedy, and — most importantly —
+        the cases where the pattern is **not** bloat.
+  - type: input
+    id: name
+    attributes:
+      label: Pattern name
+      placeholder: e.g. "vendored dependency snapshots"
+    validations:
+      required: true
+  - type: textarea
+    id: signal
+    attributes:
+      label: Detection signal
+      description: How would an agent (or the scan report) recognize this pattern?
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example of the bloat
+      description: Paths, manifest excerpts, or a minimal tree showing the pattern in the wild.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it's bloat
+    validations:
+      required: true
+  - type: textarea
+    id: exception
+    attributes:
+      label: When it is NOT bloat
+      description: Counter-exceptions prevent over-deletion — this field matters most.
+    validations:
+      required: true
+  - type: textarea
+    id: remedy
+    attributes:
+      label: Suggested remedy
+      description: The safe removal or untracking procedure, if you have one.
+    validations:
+      required: false

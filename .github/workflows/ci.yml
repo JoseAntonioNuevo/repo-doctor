@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Demo pipeline smoke test
+        run: |
+          # make-demo builds its fixture repo in a temp dir and prints the path on stdout.
+          FIXTURE="$(npx tsx examples/make-demo.ts)"
+          npx tsx scripts/scan.ts --cwd "$FIXTURE" --out /tmp/demo-report.json
+          npx tsx scripts/plan.ts --report /tmp/demo-report.json \
+            --out-plan /tmp/demo-plan.json --out-md /tmp/demo-plan.md
+          node -e 'const p=require("/tmp/demo-plan.json"); if(!p.items.some(i=>i.action==="untrack-and-gitignore"&&i.target.startsWith("dist/"))){console.error("planted dist/ build artifact missing from demo plan");process.exit(1)}'

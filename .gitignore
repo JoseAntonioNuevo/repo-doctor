@@ -1,0 +1,5 @@
+node_modules/
+.repo-doctor/
+coverage/
+*.log
+.DS_Store
