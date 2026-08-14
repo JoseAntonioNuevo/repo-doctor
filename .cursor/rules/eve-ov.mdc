@@ -1,0 +1,22 @@
+---
+description: OpenViking memory + Eve CI after implementation (portable)
+alwaysApply: true
+---
+
+This checkout is the same git repo on the VPS and on local Cursor.
+Do not follow host IPs, `/srv` paths, or VPS-only SSH recipes from this file.
+
+# OpenViking
+
+- Account: `(none)`. **No OpenViking account** for this repo — fail closed; do not invent a tenant
+- One product → one account. Fail closed. Never invent a tenant.
+- Use the OpenViking MCP configured for this machine. Writes: secret-free
+  session notes; promote durable facts. No secrets/PII in OV.
+
+# Eve (local GitHub Actions)
+
+- Eve never edits this repository.
+- When you finish implementing, call Eve CI (`eve_ci` MCP, or `.githooks/eve-ci`
+  if this checkout has it). If it fails, fix the code and run it again.
+- Do not ask Eve to apply patches or open implementation PRs.
+- Jobs are whatever `engineering-quality.yaml` declares for this repo.
