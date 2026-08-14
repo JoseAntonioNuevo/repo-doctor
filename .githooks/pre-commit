@@ -1,0 +1,14 @@
+#!/bin/sh
+# Fast deterministic pre-commit. No LLM.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if [ -x "$here/secret-scan.sh" ]; then
+  "$here/secret-scan.sh"
+fi
+
+# Optional repo-local extra hook (does not replace this file).
+if [ -x "$here/pre-commit.local" ]; then
+  "$here/pre-commit.local"
+fi

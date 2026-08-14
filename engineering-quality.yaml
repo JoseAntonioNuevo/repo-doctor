@@ -1,0 +1,108 @@
+repo: repo-doctor
+openviking_account: null
+clone: .
+remote: git@github.com:JoseAntonioNuevo/repo-doctor.git
+role: skill
+install: pnpm install --frozen-lockfile
+build: null
+lint: null
+typecheck: pnpm typecheck
+format: null
+test:
+  fast: pnpm test
+  full: pnpm test
+  e2e: null
+affected_tests: Vitest for scripts/ and tests/.
+critical_paths:
+- scripts
+- tests
+- SKILL.md
+security_paths:
+- scripts
+database_paths: []
+user_journeys:
+- skill run
+deployment:
+  kind: none
+  notes: Public skill; no OpenViking account.
+autonomous_commands:
+- typecheck
+- fast_test
+- secret_scan
+requires_human_approval:
+- merge
+- prod_migrate
+- mutate_prod_data
+- secrets
+- iam
+- billing
+- destroy_infra
+prohibited:
+- git push origin main
+- git push origin master
+- gh pr merge
+- supabase db push --linked
+- docker compose down
+secret_scan: hook
+coverage:
+  capable: false
+  command: null
+supabase:
+  used: false
+  readonly_configured: false
+capabilities:
+  database:
+    enabled: false
+    kind: none
+    migrations_path: null
+    preview_db: none
+    production_sql: forbidden
+  browser_qa:
+    enabled: false
+    runner: none
+    config: null
+    execute_autonomous: false
+  release:
+    enabled: false
+    observe_production: false
+    autonomous_deploy: false
+    autonomous_rollback: false
+    smoke: null
+    health: null
+  incident:
+    enabled: false
+    sources: []
+  integrity:
+    enabled: false
+    readonly: true
+    cadence: none
+    source: none
+  dependency:
+    enabled: true
+    cadence: weekly
+    draft_pr: true
+    merge: false
+    ignore_major_unless_security: true
+  ci_investigator:
+    enabled: true
+    hosted_gha: billing_disabled
+  knowledge:
+    enabled: true
+    propose_via_pr: true
+  issue_factory:
+    enabled: true
+    accept_labels:
+    - agent-ready
+    max_risk: medium
+    max_correction_cycles: 2
+    draft_pr: true
+    merge: false
+review:
+  mode: shadow
+  github_write: false
+  comment_policy: summary_plus_high_blocker
+writes:
+  review_comments: false
+  actionable_issues: false
+  draft_pr: true
+  merge: false

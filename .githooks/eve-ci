@@ -1,0 +1,62 @@
+#!/bin/sh
+# Eve CI — local GitHub Actions for this clone.
+# Runs the suite declared in engineering-quality.yaml.
+# Never edits product code. Exit 1 if a required check fails.
+# If Eve CI is not installed on this machine, exit 0 so a Mac clone still pushes.
+set -eu
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Hook lives at <clone>/.githooks/eve-ci — do not trust the caller's cwd.
+ROOT="$(git -C "$here/.." rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$ROOT" ]; then
+  ROOT="$(CDPATH= cd -- "$here/.." && pwd)"
+fi
+
+resolve_eve_ci() {
+  if [ -n "${EVE_CI_ROOT:-}" ] && [ -f "${EVE_CI_ROOT}/scripts/run-repo-review.mjs" ]; then
+    printf '%s\n' "$EVE_CI_ROOT"
+    return 0
+  fi
+  if [ -n "${EVE_ENGINEERING_ROOT:-}" ] && [ -f "${EVE_ENGINEERING_ROOT}/scripts/run-repo-review.mjs" ]; then
+    printf '%s\n' "$EVE_ENGINEERING_ROOT"
+    return 0
+  fi
+  if command -v eve-ci-run >/dev/null 2>&1; then
+    printf '%s\n' "PATH"
+    return 0
+  fi
+  if [ -f "$HOME/repos/eve-ci/scripts/run-repo-review.mjs" ]; then
+    printf '%s\n' "$HOME/repos/eve-ci"
+    return 0
+  fi
+  return 1
+}
+
+FACTORY="$(resolve_eve_ci || true)"
+if [ -z "$FACTORY" ]; then
+  echo "eve-ci: Eve CI not installed on this machine (set EVE_CI_ROOT). Skipping."
+  exit 0
+fi
+
+YAML="$ROOT/engineering-quality.yaml"
+if [ -f "$YAML" ]; then
+  REPO_NAME="$(python3 -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['repo'])" "$YAML")"
+else
+  REPO_NAME="$(basename "$ROOT")"
+  REPO_NAME="${REPO_NAME%--eve-engineering-foundation}"
+fi
+
+PATHS="${EVE_CI_PATHS:-}"
+if [ -z "$PATHS" ]; then
+  PATHS="$(git -C "$ROOT" diff --name-only @{upstream}...HEAD 2>/dev/null || git -C "$ROOT" diff --name-only HEAD || true)"
+fi
+CSV="$(printf '%s' "$PATHS" | paste -sd, -)"
+
+echo "eve-ci: repo=$REPO_NAME (local Actions; no code edits)"
+
+if [ "$FACTORY" = "PATH" ]; then
+  exec eve-ci-run --repo "$REPO_NAME" --clone "$ROOT" --paths "$CSV"
+fi
+
+exec node --experimental-strip-types "$FACTORY/scripts/run-repo-review.mjs" \
+  --repo "$REPO_NAME" --clone "$ROOT" --paths "$CSV"
